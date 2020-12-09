@@ -555,6 +555,7 @@ If problems persist, please see %s.`
 		if err := func() error {
 			// Instantiate the server.
 			var err error
+			//1.装配 创世纪
 			s, err = server.NewServer(serverCfg, stopper)
 			if err != nil {
 				return errors.Wrap(err, "failed to start server")
@@ -568,7 +569,7 @@ If problems persist, please see %s.`
 			if draining {
 				return nil
 			}
-
+			//2.准备启动
 			// Attempt to start the server.
 			if err := s.PreStart(ctx); err != nil {
 				if le := (*server.ListenError)(nil); errors.As(err, &le) {
@@ -606,7 +607,7 @@ If problems persist, please see %s.`
 			if err := s.AcceptClients(ctx); err != nil {
 				return err
 			}
-
+			// 输出成功日志了
 			// Now inform the user that the server is running and tell the
 			// user about its run-time derived parameters.
 			var buf redact.StringBuilder
@@ -713,6 +714,7 @@ If problems persist, please see %s.`
 
 	stopWithoutDrain := make(chan struct{}) // closed if interrupted very early
 
+	// 等待关闭事件
 	// Block until one of the signals above is received or the stopper
 	// is stopped externally (for example, via the quit endpoint).
 	select {

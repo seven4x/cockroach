@@ -1042,6 +1042,7 @@ func getServerEndpointCounter(method string) telemetry.Counter {
 	return telemetry.GetCounter(fmt.Sprintf("%s.%s", counterPrefix, method))
 }
 
+//测试用，可见启动最外层链路就是-PreStart->AcceptClients
 // Start calls PreStart() and AcceptClient() in sequence.
 // This is suitable for use e.g. in tests.
 func (s *Server) Start(ctx context.Context) error {

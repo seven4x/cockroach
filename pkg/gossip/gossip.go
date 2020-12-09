@@ -223,9 +223,10 @@ type Gossip struct {
 
 	*server // Embedded gossip RPC server
 
-	Connected     chan struct{}       // Closed upon initial connection
-	hasConnected  bool                // Set first time network is connected
-	rpcContext    *rpc.Context        // The context required for RPC
+	Connected    chan struct{} // Closed upon initial connection
+	hasConnected bool          // Set first time network is connected
+	rpcContext   *rpc.Context  // The context required for RPC
+	//默认一个node联系3个节点
 	outgoing      nodeSet             // Set of outgoing client node IDs
 	storage       Storage             // Persistent storage interface
 	bootstrapInfo BootstrapInfo       // BootstrapInfo proto for persistent storage
@@ -247,7 +248,8 @@ type Gossip struct {
 
 	stallInterval     time.Duration
 	bootstrapInterval time.Duration
-	cullInterval      time.Duration
+	//剔除 间隔
+	cullInterval time.Duration
 
 	// The system config is treated unlike other info objects.
 	// It is used so often that we keep an unmarshaled version of it
@@ -895,7 +897,7 @@ func (g *Gossip) updateClients() {
 	}
 	g.clientsMu.Unlock()
 	g.mu.RUnlock()
-
+	//gossip-clients-当前id 当前node联系的其他id逗号分隔
 	if err := g.AddInfo(MakeGossipClientsKey(nodeID), buf.Bytes(), 2*defaultClientsInterval); err != nil {
 		log.Errorf(g.AnnotateCtx(context.Background()), "%v", err)
 	}

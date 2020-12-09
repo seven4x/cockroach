@@ -240,7 +240,7 @@ func (is *infoStore) addInfo(key string, i *Info) error {
 	// timestamps are equal, but new hops is smaller.
 	existingInfo, ok := is.Infos[key]
 	if ok {
-		iNanos := i.Value.Timestamp.WallTime
+		iNanos := i.Value.Timestamp.WallTime //物理时间
 		existingNanos := existingInfo.Value.Timestamp.WallTime
 		if iNanos < existingNanos || (iNanos == existingNanos && i.Hops >= existingInfo.Hops) {
 			return errNotFresh
