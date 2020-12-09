@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -263,6 +264,16 @@ func showFamilyClause(desc catalog.TableDescriptor, f *tree.FmtCtx) {
 		formatQuoteNames(&f.Buffer, activeColumnNames...)
 		f.WriteString(")")
 	}
+}
+
+// showCreateLocality creates the LOCALITY clauses for a CREATE statement, writing them
+// to tree.FmtCtx f.
+func showCreateLocality(desc catalog.TableDescriptor, f *tree.FmtCtx) error {
+	if c := desc.TableDesc().LocalityConfig; c != nil {
+		f.WriteString(" LOCALITY ")
+		return tabledesc.FormatTableLocalityConfig(c, f)
+	}
+	return nil
 }
 
 // showCreateInterleave returns an INTERLEAVE IN PARENT clause for the specified

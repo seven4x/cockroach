@@ -620,6 +620,16 @@ func TestBackupRestoreAppend(t *testing.T) {
 
 			sqlDB.Exec(t, "DROP DATABASE data CASCADE")
 			sqlDB.Exec(t, "RESTORE DATABASE data FROM $4 IN ($1, $2, $3) AS OF SYSTEM TIME "+ts2, append(collections, fullBackup2)...)
+
+			if test.name != "userfile" {
+				// Cluster restores from userfile are not supported yet since the
+				// restoring cluster needs to be empty, which means it can't contain any
+				// userfile tables.
+
+				_, _, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, MultiNode, tmpDir, InitNone, base.TestClusterArgs{})
+				defer cleanupEmptyCluster()
+				sqlDBRestore.Exec(t, "RESTORE FROM $4 IN ($1, $2, $3) AS OF SYSTEM TIME "+ts2, append(collections, fullBackup2)...)
+			}
 		}
 
 		if test.name == "userfile" {
@@ -923,8 +933,8 @@ func backupAndRestore(
 			}
 			backupDetails := backupPayload.Backup
 			found = true
-			if err := protoutil.Unmarshal(backupDetails.BackupManifest, backupManifest); err != nil {
-				t.Fatal("cannot unmarshal backup descriptor from job payload from system.jobs")
+			if backupDetails.DeprecatedBackupManifest != nil {
+				t.Fatal("expected backup_manifest field of backup descriptor payload to be nil")
 			}
 			if backupManifest.DeprecatedStatistics != nil {
 				t.Fatal("expected statistics field of backup descriptor payload to be nil")
@@ -1530,9 +1540,8 @@ func TestBackupRestoreResume(t *testing.T) {
 		createAndWaitForJob(
 			t, sqlDB, []descpb.ID{backupTableDesc.ID},
 			jobspb.BackupDetails{
-				EndTime:        tc.Servers[0].Clock().Now(),
-				URI:            "nodelocal://0/backup",
-				BackupManifest: mockManifest,
+				EndTime: tc.Servers[0].Clock().Now(),
+				URI:     "nodelocal://0/backup",
 			},
 			jobspb.BackupProgress{},
 		)
@@ -5853,6 +5862,7 @@ func TestProtectedTimestampSpanSelectionDuringBackup(t *testing.T) {
 	})
 
 	t.Run("last-index-gced", func(t *testing.T) {
+		skip.WithIssue(t, 57546, "flaky test")
 		runner.Exec(t, "CREATE DATABASE test; USE test;")
 		runner.Exec(t, "CREATE TABLE foo (k INT PRIMARY KEY, v BYTES, name STRING, INDEX baz(name))")
 		runner.Exec(t, "INSERT INTO foo VALUES (1, NULL, 'test')")
