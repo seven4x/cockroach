@@ -413,6 +413,7 @@ func (is *infoStore) combine(
 // taking this delta for).
 //
 // May modify the infoStore.
+// 这个方法名很奇怪：（Delta（大写Δ，小写δ，中文音译：德尔塔、德耳塔），是第四个希腊字母。）https://zh.wikipedia.org/wiki/%CE%94
 func (is *infoStore) delta(highWaterTimestamps map[roachpb.NodeID]int64) map[string]*Info {
 	infos := make(map[string]*Info)
 	// Compute delta of infos.

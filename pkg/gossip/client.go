@@ -100,6 +100,7 @@ func (c *client) startLocked(
 
 		consecFailures := breaker.ConsecFailures()
 		var stream Gossip_GossipClient
+		//第一次请求没携带数据，先拨通创建connect
 		if err := breaker.Call(func() error {
 			// Note: avoid using `grpc.WithBlock` here. This code is already
 			// asynchronous from the caller's perspective, so the only effect of
@@ -119,7 +120,7 @@ func (c *client) startLocked(
 			}
 			return
 		}
-
+		// 后面开始传递数据来
 		// Start gossiping.
 		log.Infof(ctx, "started gossip client to %s", c.addr)
 		if err := c.gossip(ctx, g, stream, stopper, &wg); err != nil {
@@ -311,6 +312,7 @@ func (c *client) gossip(
 	// This wait group is used to allow the caller to wait until gossip
 	// processing is terminated.
 	wg.Add(1)
+	//这里开启一个协程处理返回，也是一个死循环
 	stopper.RunWorker(ctx, func(ctx context.Context) {
 		defer wg.Done()
 
@@ -361,20 +363,21 @@ func (c *client) gossip(
 	}
 	initTimer := time.NewTimer(time.Second)
 	defer initTimer.Stop()
-
+	//这里是个死循环一直传递数据一直到客户端关闭
 	for count := 0; ; {
 		select {
 		case <-c.closer:
 			return nil
 		case <-stopper.ShouldStop():
 			return nil
+		//有缓冲区的队列，没有协程往里面写，读时会阻塞
 		case err := <-errCh:
 			return err
-		case <-initCh:
+		case <-initCh: //这里表示handleResponse init完成后执行
 			maybeRegister()
 		case <-initTimer.C:
 			maybeRegister()
-		case <-sendGossipChan:
+		case <-sendGossipChan: //用这个ch控制表示init协程执行完成了 再来发送
 			if err := c.sendGossip(g, stream, count == 0); err != nil {
 				return err
 			}

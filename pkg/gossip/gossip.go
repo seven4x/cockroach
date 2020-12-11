@@ -1269,7 +1269,7 @@ func (g *Gossip) getNextBootstrapAddressLocked() net.Addr {
 	// Run through resolvers round robin starting at last resolved index.
 	for i := 0; i < len(g.resolvers); i++ {
 		g.resolverIdx++
-		g.resolverIdx %= len(g.resolvers)
+		g.resolverIdx %= len(g.resolvers) //保证不越界
 		defer func(idx int) { g.resolversTried[idx] = struct{}{} }(g.resolverIdx)
 		resolver := g.resolvers[g.resolverIdx]
 		if addr, err := resolver.GetAddress(); err != nil {
@@ -1311,6 +1311,7 @@ func (g *Gossip) bootstrap() {
 				log.Eventf(ctx, "have clients: %t, have sentinel: %t", haveClients, haveSentinel)
 				if !haveClients || !haveSentinel {
 					// Try to get another bootstrap address from the resolvers.
+					// 找一个peer建立连接
 					if addr := g.getNextBootstrapAddressLocked(); addr != nil {
 						g.startClientLocked(addr)
 					} else {
@@ -1375,7 +1376,7 @@ func (g *Gossip) manage() {
 		cullTimer.Reset(jitteredInterval(g.cullInterval))
 		stallTimer.Reset(jitteredInterval(g.stallInterval))
 		for {
-			select {
+			select { //通过ch沟通，连接释放或更新，也是个死循环
 			case <-g.server.stopper.ShouldStop():
 				return
 			case c := <-g.disconnected:
