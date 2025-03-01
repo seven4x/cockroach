@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobsprotectedts
 
@@ -49,9 +44,9 @@ func GetMetaType(metaType MetaType) string {
 	return metaTypes[metaType]
 }
 
-// MakeStatusFunc returns a function which determines whether the job or
+// MakeStateFunc returns a function which determines whether the job or
 // schedule implied with this value of meta should be removed by the reconciler.
-func MakeStatusFunc(jr *jobs.Registry, metaType MetaType) ptreconcile.StatusFunc {
+func MakeStateFunc(jr *jobs.Registry, metaType MetaType) ptreconcile.StatusFunc {
 	switch metaType {
 	case Jobs:
 		return func(ctx context.Context, txn isql.Txn, meta []byte) (shouldRemove bool, _ error) {
@@ -66,8 +61,7 @@ func MakeStatusFunc(jr *jobs.Registry, metaType MetaType) ptreconcile.StatusFunc
 			if err != nil {
 				return false, err
 			}
-			isTerminal := j.WithTxn(txn).CheckTerminalStatus(ctx)
-			return isTerminal, nil
+			return j.State().Terminal(), nil
 		}
 	case Schedules:
 		return func(ctx context.Context, txn isql.Txn, meta []byte) (shouldRemove bool, _ error) {
@@ -76,7 +70,7 @@ func MakeStatusFunc(jr *jobs.Registry, metaType MetaType) ptreconcile.StatusFunc
 				return false, err
 			}
 			_, err = jobs.ScheduledJobTxn(txn).
-				Load(ctx, scheduledjobs.ProdJobSchedulerEnv, scheduleID)
+				Load(ctx, scheduledjobs.ProdJobSchedulerEnv, jobspb.ScheduleID(scheduleID))
 			if jobs.HasScheduledJobNotFoundError(err) {
 				return true, nil
 			}

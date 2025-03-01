@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgradebase
 
@@ -32,9 +27,9 @@ const (
 // are useful for testing.
 type TestingKnobs struct {
 
-	// ListBetweenOverride injects an override for `clusterversion.ListBetween()
-	// in order to run upgrades corresponding to versions which do not
-	// actually exist.
+	// ListBetweenOverride injects an override for clusterversion.ListBetween() in
+	// order to run upgrades corresponding to versions which do not actually
+	// exist. This function has to return versions in the range (from, to].
 	ListBetweenOverride func(from, to roachpb.Version) []roachpb.Version
 
 	// RegistryOverride is used to inject upgrades for specific cluster versions.
@@ -63,11 +58,6 @@ type TestingKnobs struct {
 	// job from being created.
 	SkipJobMetricsPollingJobBootstrap bool
 
-	// SkipAutoConfigRunnerJobBootstrap, if set, disables the
-	// clusterversion.V23_1_CreateAutoConfigRunnerJob upgrade, which prevents a
-	// job from being created.
-	SkipAutoConfigRunnerJobBootstrap bool
-
 	// AfterRunPermanentUpgrades is called after each call to
 	// RunPermanentUpgrades.
 	AfterRunPermanentUpgrades func()
@@ -76,6 +66,16 @@ type TestingKnobs struct {
 	// clusterversion.V23_1AddSystemActivityTables upgrade, which prevents a
 	// job from being created.
 	SkipUpdateSQLActivityJobBootstrap bool
+
+	SkipMVCCStatisticsJobBootstrap bool
+
+	SkipUpdateTableMetadataCacheBootstrap bool
+
+	SkipSqlActivityFlushJobBootstrap bool
+
+	// ForceCheckLicenseViolation is true if we want the v24_3_check_license_violation.go
+	// task to continue even though we are in a test environment.
+	ForceCheckLicenseViolation bool
 }
 
 // ModuleTestingKnobs makes TestingKnobs a base.ModuleTestingKnobs.

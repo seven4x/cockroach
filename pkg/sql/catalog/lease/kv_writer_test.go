@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/settingswatcher"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/enum"
@@ -39,11 +35,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MoveTablePrimaryIndexIDto2 is used to move the primary index of the created
-// lease table from 1 to 2. It is injected from the lease_test package so that
+// MoveTablePrimaryIndexID used to move the primary index of the created
+// lease table from 1 to some target. It is injected from the lease_test package so that
 // it can use sql primitives.
-var MoveTablePrimaryIndexIDto2 func(
-	context.Context, *testing.T, serverutils.TestServerInterface, descpb.ID,
+var MoveTablePrimaryIndexIDtoTarget func(
+	context.Context, *testing.T, serverutils.ApplicationLayerInterface, descpb.ID, descpb.IndexID,
 )
 
 // TestKVWriterMatchesIEWriter is a rather involved test to exercise the
@@ -51,32 +47,44 @@ var MoveTablePrimaryIndexIDto2 func(
 // to the underlying key-value store. It does this by teeing operations to
 // both under different table prefixes and then fetching the histories of
 // those tables, removing the prefix and exact timestamps, and ensuring
-// they are the same.
+// they are the same. This test will run against both the old and new table
+// formats (with expiration or session ID).
 func TestKVWriterMatchesIEWriter(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	s, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(ctx)
-	tdb := sqlutils.MakeSQLRunner(sqlDB)
+	serverArgs := base.TestServerArgs{}
+	serverArgs.Settings = cluster.MakeClusterSettings()
+	srv, sqlDB, kvDB := serverutils.StartServer(t, serverArgs)
+	defer srv.Stopper().Stop(ctx)
+	s := srv.ApplicationLayer()
 
 	// Otherwise, we wouldn't get complete SSTs in our export under stress.
-	tdb.Exec(t, "SET CLUSTER SETTING admission.elastic_cpu.enabled = false")
+	sqlutils.MakeSQLRunner(srv.SystemLayer().SQLConn(t)).Exec(
+		t, "SET CLUSTER SETTING admission.elastic_cpu.enabled = false",
+	)
 
-	schema := systemschema.LeaseTableSchema
+	tdb := sqlutils.MakeSQLRunner(sqlDB)
+	schema := strings.Replace(systemschema.LeaseTableSchema,
+		"exclude_data_from_backup = true",
+		"exclude_data_from_backup = false",
+		1)
+
 	makeTable := func(name string) (id descpb.ID) {
+		// Rewrite the schema and drop the exclude_data_from_backup from flag,
+		// since this will prevent export from working later on in the test.
 		tdb.Exec(t, strings.Replace(schema, "system.lease", name, 1))
 		tdb.QueryRow(t, "SELECT id FROM system.namespace WHERE name = $1", name).Scan(&id)
-		// The MR variant of the table uses a non-
-		MoveTablePrimaryIndexIDto2(ctx, t, s, id)
+		// Modifies the primary index IDs to line up with the session based
+		// or multi-region expiry based formats of the table.
+		MoveTablePrimaryIndexIDtoTarget(ctx, t, s, id, 3)
 		return id
 	}
 	lease1ID := makeTable("lease1")
 	lease2ID := makeTable("lease2")
-
-	ie := s.InternalExecutor().(isql.Executor)
-	codec := s.LeaseManager().(*Manager).Codec()
+	ie := s.InternalDB().(isql.DB).Executor()
+	codec := s.Codec()
 	settingsWatcher := s.SettingsWatcher().(*settingswatcher.SettingsWatcher)
 	w := teeWriter{
 		a: newInternalExecutorWriter(ie, "defaultdb.public.lease1"),
@@ -208,6 +216,7 @@ func generateWriteOps(n, numGroups int) func() (_ []writeOp, wantMore bool) {
 			version:      descpb.DescriptorVersion(rand.Intn(vals)),
 			instanceID:   base.SQLInstanceID(rand.Intn(vals)),
 			expiration:   *ts,
+			sessionID:    []byte(ts.String() + "_session"),
 			regionPrefix: enum.One,
 		}
 		return lf

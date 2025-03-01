@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
@@ -103,6 +98,8 @@ func TestTypeCheck(t *testing.T) {
 		{`ARRAY[NULL, NULL]:::int[]`, `ARRAY[NULL, NULL]:::INT8[]`},
 		{`ARRAY[]::INT8[]`, `ARRAY[]:::INT8[]`},
 		{`ARRAY[]:::INT8[]`, `ARRAY[]:::INT8[]`},
+		{`ARRAY[1::INT, 1::FLOAT8]`, `ARRAY[1:::INT8::FLOAT8, 1.0:::FLOAT8]:::FLOAT8[]`},
+		{`ARRAY[(1::INT,), (1::FLOAT8,)]`, `ARRAY[(1:::INT8::FLOAT8,), (1.0:::FLOAT8,)]:::RECORD[]`},
 		{`1 = ANY ARRAY[1.5, 2.5, 3.5]`, `1:::DECIMAL = ANY ARRAY[1.5:::DECIMAL, 2.5:::DECIMAL, 3.5:::DECIMAL]:::DECIMAL[]`},
 		{`true = SOME (ARRAY[true, false])`, `true = SOME ARRAY[true, false]:::BOOL[]`},
 		{`1.3 = ALL ARRAY[1, 2, 3]`, `1.3:::DECIMAL = ALL ARRAY[1:::DECIMAL, 2:::DECIMAL, 3:::DECIMAL]:::DECIMAL[]`},
@@ -169,7 +166,10 @@ func TestTypeCheck(t *testing.T) {
 			`CASE WHEN true THEN ('a', 2) ELSE NULL:::RECORD END`,
 			`CASE WHEN true THEN ('a':::STRING, 2:::INT8) ELSE NULL END`,
 		},
-
+		{
+			`CASE WHEN true THEN NULL:::RECORD ELSE ('a', 2) END`,
+			`CASE WHEN true THEN NULL ELSE ('a':::STRING, 2:::INT8) END`,
+		},
 		{`((ROW (1) AS a)).a`, `1:::INT8`},
 		{`((('1', 2) AS a, b)).a`, `'1':::STRING`},
 		{`((('1', 2) AS a, b)).b`, `2:::INT8`},
@@ -228,12 +228,9 @@ func TestTypeCheck(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", d.expr, err)
 			}
-			semaCtx := tree.MakeSemaContext()
-			if err := semaCtx.Placeholders.Init(1 /* numPlaceholders */, nil /* typeHints */); err != nil {
-				t.Fatal(err)
-			}
-			semaCtx.TypeResolver = mapResolver
-			typeChecked, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+			semaCtx := tree.MakeSemaContext(mapResolver)
+			semaCtx.Placeholders.Init(1 /* numPlaceholders */, nil /* typeHints */)
+			typeChecked, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 			if err != nil {
 				t.Fatalf("%s: unexpected error %s", d.expr, err)
 			}
@@ -353,13 +350,12 @@ func TestTypeCheckError(t *testing.T) {
 		t.Run(d.expr, func(t *testing.T) {
 			// Test with a nil and non-nil semaCtx.
 			t.Run("semaCtx not nil", func(t *testing.T) {
-				semaCtx := tree.MakeSemaContext()
-				semaCtx.TypeResolver = mapResolver
+				semaCtx := tree.MakeSemaContext(mapResolver)
 				expr, err := parser.ParseExpr(d.expr)
 				if err != nil {
 					t.Fatalf("%s: %v", d.expr, err)
 				}
-				if _, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any); !testutils.IsError(err, regexp.QuoteMeta(d.expected)) {
+				if _, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement); !testutils.IsError(err, regexp.QuoteMeta(d.expected)) {
 					t.Errorf("%s: expected %s, but found %v", d.expr, d.expected, err)
 				}
 			})
@@ -368,7 +364,7 @@ func TestTypeCheckError(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s: %v", d.expr, err)
 				}
-				if _, err := tree.TypeCheck(ctx, expr, nil, types.Any); !testutils.IsError(err, regexp.QuoteMeta(d.expected)) {
+				if _, err := tree.TypeCheck(ctx, expr, nil, types.AnyElement); !testutils.IsError(err, regexp.QuoteMeta(d.expected)) {
 					t.Errorf("%s: expected %s, but found %v", d.expr, d.expected, err)
 				}
 			})
@@ -407,17 +403,15 @@ func TestTypeCheckVolatility(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
-	if err := semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes); err != nil {
-		t.Fatal(err)
-	}
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
+	semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
 
 	typeCheck := func(sql string) error {
 		expr, err := parser.ParseExpr(sql)
 		if err != nil {
 			t.Fatalf("%s: %v", sql, err)
 		}
-		_, err = tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+		_, err = tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 		return err
 	}
 
@@ -453,19 +447,18 @@ func TestTypeCheckCollatedString(t *testing.T) {
 	ctx := context.Background()
 
 	// Typecheck without any restrictions.
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	semaCtx.Properties.Require("", 0 /* flags */)
 
 	// Hint a normal string type for $1.
 	placeholderTypes := []*types.T{types.String}
-	err := semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
-	require.NoError(t, err)
+	semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
 
 	// The collated string constant must be on the LHS for this test, so that
 	// the type-checker chooses the collated string overload first.
 	expr, err := parser.ParseExpr("'cat'::STRING COLLATE \"en-US-u-ks-level2\" = ($1)")
 	require.NoError(t, err)
-	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 	require.NoError(t, err)
 
 	rightTyp := typed.(*tree.ComparisonExpr).Right.(tree.TypedExpr).ResolvedType()
@@ -478,7 +471,7 @@ func TestTypeCheckCollatedStringNestedCaseComparison(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 
 	// The collated string constant must be on the LHS for this test, so that
 	// the type-checker chooses the collated string overload first.
@@ -489,7 +482,7 @@ func TestTypeCheckCollatedStringNestedCaseComparison(t *testing.T) {
 		`('' COLLATE "es_ES") >= CASE WHEN false THEN CASE WHEN (NOT (false)) THEN NULL END ELSE ('' COLLATE "es_ES") END`} {
 		expr, err := parser.ParseExpr(exprStr)
 		require.NoError(t, err)
-		typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+		typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 		require.NoError(t, err)
 
 		for _, ex := range []tree.Expr{typed.(*tree.ComparisonExpr).Left, typed.(*tree.ComparisonExpr).Right} {
@@ -506,17 +499,16 @@ func TestTypeCheckCaseExprWithPlaceholders(t *testing.T) {
 
 	// Typecheck without any restrictions.
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	semaCtx.Properties.Require("", 0 /* flags */)
 
 	// Hint all int4 types.
 	placeholderTypes := []*types.T{types.Int4, types.Int4, types.Int4, types.Int4, types.Int4}
-	err := semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
-	require.NoError(t, err)
+	semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
 
 	expr, err := parser.ParseExpr("case when 1 < $1 then $2 else $3 end = $4")
 	require.NoError(t, err)
-	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 	require.NoError(t, err)
 
 	leftTyp := typed.(*tree.ComparisonExpr).Left.(tree.TypedExpr).ResolvedType()
@@ -529,17 +521,16 @@ func TestTypeCheckCaseExprWithConstantsAndUnresolvedPlaceholders(t *testing.T) {
 
 	// Typecheck without any restrictions.
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	semaCtx.Properties.Require("", 0 /* flags */)
 
 	// Hint all int4 types, but leave one of the THEN branches unhinted.
 	placeholderTypes := []*types.T{types.Int4, types.Int4, types.Int4, nil, types.Int4}
-	err := semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
-	require.NoError(t, err)
+	semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
 
 	expr, err := parser.ParseExpr("case when 1 < $1 then $2 when 1 < $3 then $4 else 3 end = $5")
 	require.NoError(t, err)
-	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 	require.NoError(t, err)
 
 	leftTyp := typed.(*tree.ComparisonExpr).Left.(tree.TypedExpr).ResolvedType()
@@ -561,16 +552,15 @@ func TestTypeCheckArrayWithNullAndPlaceholder(t *testing.T) {
 
 	// Typecheck without any restrictions.
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	semaCtx.Properties.Require("", 0 /* flags */)
 
 	placeholderTypes := []*types.T{types.Int}
-	err := semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
-	require.NoError(t, err)
+	semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes)
 
 	expr, err := parser.ParseExpr("array[null, $1]::int[]")
 	require.NoError(t, err)
-	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+	typed, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 	require.NoError(t, err)
 	require.Equal(t, types.IntArray, typed.ResolvedType())
 

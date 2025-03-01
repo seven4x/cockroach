@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package lock provides type definitions for locking-related concepts used by
 // concurrency control in the key-value layer.
@@ -54,7 +49,7 @@ func TestWaiterSafeFormat(t *testing.T) {
 		"waiting_txn:6ba7b810 active_waiter:true strength:Exclusive wait_duration:2m15s",
 		redact.Sprint(waiter).Redact())
 	require.EqualValues(t,
-		"waiting_txn:‹×› active_waiter:true strength:Exclusive wait_duration:2m15s",
+		"waiting_txn:6ba7b810-9dad-11d1-80b4-00c04fd430c8 active_waiter:true strength:Exclusive wait_duration:2m15s",
 		redact.Sprintf("%+v", waiter).Redact())
 
 	nonTxnWaiter := &lock.Waiter{

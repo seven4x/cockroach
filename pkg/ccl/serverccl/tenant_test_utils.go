@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package serverccl
 
@@ -18,11 +15,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/contention"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
@@ -44,7 +40,7 @@ type testTenant struct {
 	tenantConn               *gosql.DB
 	tenantDB                 *sqlutils.SQLRunner
 	tenantStatus             serverpb.SQLStatusServer
-	tenantSQLStats           *persistedsqlstats.PersistedSQLStats
+	tenantSQLServer          *sql.Server
 	tenantContentionRegistry *contention.Registry
 }
 
@@ -56,8 +52,8 @@ func (h *testTenant) GetTenantConn() *sqlutils.SQLRunner {
 	return h.tenantDB
 }
 
-func (h *testTenant) TenantSQLStats() *persistedsqlstats.PersistedSQLStats {
-	return h.tenantSQLStats
+func (h *testTenant) TenantSQLServer() *sql.Server {
+	return h.tenantSQLServer
 }
 
 func (h *testTenant) TenantStatusSrv() serverpb.SQLStatusServer {
@@ -81,7 +77,7 @@ type TestTenant interface {
 	GetTenant() serverutils.ApplicationLayerInterface
 	GetTenantDB() *gosql.DB
 	GetTenantConn() *sqlutils.SQLRunner
-	TenantSQLStats() *persistedsqlstats.PersistedSQLStats
+	TenantSQLServer() *sql.Server
 	TenantStatusSrv() serverpb.SQLStatusServer
 	TenantContentionRegistry() *contention.Registry
 	GetRPCContext() *rpc.Context
@@ -98,8 +94,7 @@ func newTestTenant(
 	tenant, tenantConn := serverutils.StartTenant(t, server, args)
 	sqlDB := sqlutils.MakeSQLRunner(tenantConn)
 	status := tenant.StatusServer().(serverpb.SQLStatusServer)
-	sqlStats := tenant.SQLServer().(*sql.Server).
-		GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats)
+	sqlServer := tenant.SQLServer().(*sql.Server)
 	contentionRegistry := tenant.ExecutorConfig().(sql.ExecutorConfig).ContentionRegistry
 
 	return &testTenant{
@@ -107,7 +102,7 @@ func newTestTenant(
 		tenantConn:               tenantConn,
 		tenantDB:                 sqlDB,
 		tenantStatus:             status,
-		tenantSQLStats:           sqlStats,
+		tenantSQLServer:          sqlServer,
 		tenantContentionRegistry: contentionRegistry,
 	}
 }
@@ -157,7 +152,7 @@ func NewTestTenantHelper(
 			t,
 			server,
 			tenantClusterSize,
-			security.EmbeddedTenantIDs()[0],
+			securitytest.EmbeddedTenantIDs()[0],
 			knobs,
 		),
 		// Spin up a small tenant cluster under a different tenant ID to test
@@ -166,7 +161,7 @@ func NewTestTenantHelper(
 			t,
 			server,
 			1, /* tenantClusterSize */
-			security.EmbeddedTenantIDs()[1],
+			securitytest.EmbeddedTenantIDs()[1],
 			knobs,
 		),
 	}
@@ -201,7 +196,7 @@ type TenantClusterHelper interface {
 	TenantDB(idx serverIdx) *gosql.DB
 	TenantHTTPClient(t *testing.T, idx serverIdx, isAdmin bool) *httpClient
 	TenantAdminHTTPClient(t *testing.T, idx serverIdx) *httpClient
-	TenantSQLStats(idx serverIdx) *persistedsqlstats.PersistedSQLStats
+	TenantSQLServer(idx serverIdx) *sql.Server
 	TenantStatusSrv(idx serverIdx) serverpb.SQLStatusServer
 	TenantContentionRegistry(idx serverIdx) *contention.Registry
 	Cleanup(t *testing.T)
@@ -253,8 +248,8 @@ func (c tenantCluster) TenantAdminHTTPClient(t *testing.T, idx serverIdx) *httpC
 	return c.TenantHTTPClient(t, idx, true /* isAdmin */)
 }
 
-func (c tenantCluster) TenantSQLStats(idx serverIdx) *persistedsqlstats.PersistedSQLStats {
-	return c.Tenant(idx).TenantSQLStats()
+func (c tenantCluster) TenantSQLServer(idx serverIdx) *sql.Server {
+	return c.Tenant(idx).TenantSQLServer()
 }
 
 func (c tenantCluster) TenantStatusSrv(idx serverIdx) serverpb.SQLStatusServer {

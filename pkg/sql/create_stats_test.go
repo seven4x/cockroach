@@ -1,17 +1,13 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -73,7 +69,7 @@ SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false;
 		defer wg.Done()
 
 		// Open a separate connection to the database.
-		db2 := s.SQLConn(t, "")
+		db2 := s.SQLConn(t)
 
 		_, err := db2.Exec("USE test")
 		if err != nil {
@@ -185,4 +181,53 @@ INSERT INTO system.table_statistics (
 		`SELECT stxrelid::regclass::text, stxname, stxnamespace::regnamespace::text FROM pg_catalog.pg_statistic_ext`,
 		[][]string{{"t", "s", "public"}},
 	)
+}
+
+// BenchmarkAnalyze runs a benchmark for the ANALYZE statement on a
+// sysbench-like table.
+func BenchmarkAnalyze(b *testing.B) {
+	defer log.Scope(b).Close(b)
+	ctx := context.Background()
+
+	s, sqlDB, _ := serverutils.StartServer(b, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+	stats.AutomaticStatisticsClusterMode.Override(ctx, &s.ClusterSettings().SV, false)
+
+	sqlRunner := sqlutils.MakeSQLRunner(sqlDB)
+	// Ensure that there's always a single range.
+	sqlRunner.Exec(b, `SET CLUSTER SETTING kv.split_queue.enabled = false`)
+	sqlRunner.Exec(b, `
+		CREATE TABLE t (
+			id INT8 PRIMARY KEY,
+			k INT8 NOT NULL DEFAULT 0,
+			c CHAR(120) NOT NULL DEFAULT '',
+			pad CHAR(60) NOT NULL DEFAULT '',
+			INDEX (k)
+		)
+	`)
+
+	const (
+		batchSize = 10_000
+		numRows   = 100_000
+	)
+
+	for i, n := 0, numRows; i < n; i += batchSize {
+		sqlRunner.Exec(b, `
+			INSERT INTO t (id, k, c, pad)
+			SELECT
+				i,
+				(random() * `+strconv.Itoa(numRows)+`)::INT, 
+				substr(md5(random()::TEXT) || md5(random()::TEXT) || md5(random()::TEXT) || md5(random()::TEXT), 0, 120),
+				substr(md5(random()::TEXT) || md5(random()::TEXT), 0, 60)
+			FROM generate_series($1, $2) AS g(i)
+		`, i, i+batchSize-1)
+	}
+
+	// Run a full table scan to resolve intents and reduce variance.
+	sqlRunner.Exec(b, `SELECT count(*) FROM t`)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sqlRunner.Exec(b, `ANALYZE t`)
+	}
 }

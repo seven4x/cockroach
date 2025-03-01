@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -24,11 +19,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
 )
 
@@ -144,8 +139,8 @@ func newCSVWriterProcessor(
 		spec:        spec,
 		input:       input,
 	}
-	semaCtx := tree.MakeSemaContext()
-	if err := c.out.Init(ctx, post, colinfo.ExportColumnTypes, &semaCtx, flowCtx.NewEvalCtx()); err != nil {
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
+	if err := c.out.Init(ctx, post, colinfo.ExportColumnTypes, &semaCtx, flowCtx.EvalCtx, flowCtx); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -174,7 +169,7 @@ func (sp *csvWriter) Run(ctx context.Context, output execinfra.RowReceiver) {
 	defer span.Finish()
 
 	instanceID := sp.flowCtx.EvalCtx.NodeID.SQLInstanceID()
-	uniqueID := builtins.GenerateUniqueInt(builtins.ProcessUniqueID(instanceID))
+	uniqueID := unique.GenerateUniqueInt(unique.ProcessUniqueID(instanceID))
 
 	err := func() error {
 		typs := sp.input.OutputTypes()
@@ -246,43 +241,39 @@ func (sp *csvWriter) Run(ctx context.Context, output execinfra.RowReceiver) {
 				return errors.Wrap(err, "failed to flush csv writer")
 			}
 
-			conf, err := cloud.ExternalStorageConfFromURI(sp.spec.Destination, sp.spec.User())
+			res, err := func() (rowenc.EncDatumRow, error) {
+				conf, err := cloud.ExternalStorageConfFromURI(sp.spec.Destination, sp.spec.User())
+				if err != nil {
+					return nil, err
+				}
+				es, err := sp.flowCtx.Cfg.ExternalStorage(ctx, conf)
+				if err != nil {
+					return nil, err
+				}
+				defer es.Close()
+
+				part := fmt.Sprintf("n%d.%d", uniqueID, chunk)
+				chunk++
+				filename := writer.FileName(sp.spec, part)
+				// Close writer to ensure buffer and any compression footer is flushed.
+				err = writer.Close()
+				if err != nil {
+					return nil, errors.Wrapf(err, "failed to close exporting writer")
+				}
+
+				size := writer.Len()
+
+				if err := cloud.WriteFile(ctx, es, filename, bytes.NewReader(writer.Bytes())); err != nil {
+					return nil, err
+				}
+				return rowenc.EncDatumRow{
+					rowenc.DatumToEncDatum(types.String, tree.NewDString(filename)),
+					rowenc.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(rows))),
+					rowenc.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(size))),
+				}, nil
+			}()
 			if err != nil {
 				return err
-			}
-			es, err := sp.flowCtx.Cfg.ExternalStorage(ctx, conf)
-			if err != nil {
-				return err
-			}
-			defer es.Close()
-
-			part := fmt.Sprintf("n%d.%d", uniqueID, chunk)
-			chunk++
-			filename := writer.FileName(sp.spec, part)
-			// Close writer to ensure buffer and any compression footer is flushed.
-			err = writer.Close()
-			if err != nil {
-				return errors.Wrapf(err, "failed to close exporting writer")
-			}
-
-			size := writer.Len()
-
-			if err := cloud.WriteFile(ctx, es, filename, bytes.NewReader(writer.Bytes())); err != nil {
-				return err
-			}
-			res := rowenc.EncDatumRow{
-				rowenc.DatumToEncDatum(
-					types.String,
-					tree.NewDString(filename),
-				),
-				rowenc.DatumToEncDatum(
-					types.Int,
-					tree.NewDInt(tree.DInt(rows)),
-				),
-				rowenc.DatumToEncDatum(
-					types.Int,
-					tree.NewDInt(tree.DInt(size)),
-				),
 			}
 
 			cs, err := sp.out.EmitRow(ctx, res, output)
@@ -302,15 +293,16 @@ func (sp *csvWriter) Run(ctx context.Context, output execinfra.RowReceiver) {
 		return nil
 	}()
 
-	// TODO(dt): pick up tracing info in trailing meta
-	execinfra.DrainAndClose(
-		ctx, output, err, func(context.Context, execinfra.RowReceiver) {} /* pushTrailingMeta */, sp.input)
+	execinfra.DrainAndClose(ctx, sp.flowCtx, sp.input, output, err)
 }
 
 // Resume is part of the execinfra.Processor interface.
 func (sp *csvWriter) Resume(output execinfra.RowReceiver) {
 	panic("not implemented")
 }
+
+// Close is part of the execinfra.Processor interface.
+func (*csvWriter) Close(context.Context) {}
 
 func init() {
 	rowexec.NewCSVWriterProcessor = newCSVWriterProcessor

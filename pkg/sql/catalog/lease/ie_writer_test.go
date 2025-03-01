@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
@@ -26,16 +21,15 @@ type ieWriter struct {
 }
 
 func newInternalExecutorWriter(ie isql.Executor, tableName string) *ieWriter {
-	const (
-		deleteLease = `
+
+	deleteLease := `
 DELETE FROM %s
-      WHERE (crdb_region, "descID", version, "nodeID", expiration)
+      WHERE (crdb_region, desc_id, version, sql_instance_id, session_id)
             = ($1, $2, $3, $4, $5);`
-		insertLease = `
+	insertLease := `
 INSERT
-  INTO %s (crdb_region, "descID", version, "nodeID", expiration)
+  INTO %s (crdb_region, desc_id, version, sql_instance_id, session_id)
 VALUES ($1, $2, $3, $4, $5)`
-	)
 	return &ieWriter{
 		ie:          ie,
 		insertQuery: fmt.Sprintf(insertLease, tableName),
@@ -49,14 +43,14 @@ func (w *ieWriter) deleteLease(ctx context.Context, txn *kv.Txn, l leaseFields) 
 		"lease-release",
 		nil, /* txn */
 		w.deleteQuery,
-		l.regionPrefix, l.descID, l.version, l.instanceID, &l.expiration,
+		l.regionPrefix, l.descID, l.version, l.instanceID, l.sessionID,
 	)
 	return err
 }
 
 func (w *ieWriter) insertLease(ctx context.Context, txn *kv.Txn, l leaseFields) error {
 	count, err := w.ie.Exec(ctx, "lease-insert", txn, w.insertQuery,
-		l.regionPrefix, l.descID, l.version, l.instanceID, &l.expiration,
+		l.regionPrefix, l.descID, l.version, l.instanceID, l.sessionID,
 	)
 	if err != nil {
 		return err

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -35,12 +30,17 @@ import (
 // method and then pass through that property in the buildChildPhysicalProps
 // method.
 func CanProvidePhysicalProps(
-	ctx context.Context, evalCtx *eval.Context, e memo.RelExpr, required *physical.Required,
+	ctx context.Context,
+	evalCtx *eval.Context,
+	mem *memo.Memo,
+	e memo.RelExpr,
+	required *physical.Required,
 ) bool {
 	// All operators can provide the Presentation and LimitHint properties, so no
 	// need to check for that.
-	canProvideOrdering := e.Op() == opt.SortOp || ordering.CanProvide(e, &required.Ordering)
-	canProvideDistribution := e.Op() == opt.DistributeOp || distribution.CanProvide(ctx, evalCtx, e, &required.Distribution)
+	canProvideOrdering := e.Op() == opt.SortOp || ordering.CanProvide(mem, e, &required.Ordering)
+	canProvideDistribution := e.Op() == opt.DistributeOp ||
+		distribution.CanProvide(ctx, evalCtx, mem, e, &required.Distribution)
 	return canProvideOrdering && canProvideDistribution
 }
 
@@ -59,7 +59,7 @@ func BuildChildPhysicalProps(
 
 	// ScalarExprs don't support required physical properties; don't build
 	// physical properties for them.
-	if _, ok := parent.Child(nth).(opt.ScalarExpr); ok {
+	if opt.IsScalarOp(parent.Child(nth)) {
 		return mem.InternPhysicalProps(&childProps)
 	}
 
@@ -86,7 +86,7 @@ func BuildChildPhysicalProps(
 		childProps.Presentation = parent.(*memo.ExportExpr).Props.Presentation
 	}
 
-	childProps.Ordering = ordering.BuildChildRequired(parent, &parentProps.Ordering, nth)
+	childProps.Ordering = ordering.BuildChildRequired(mem, parent, &parentProps.Ordering, nth)
 	childProps.Distribution = distribution.BuildChildRequired(parent, &parentProps.Distribution, nth)
 
 	switch parent.Op() {
@@ -108,7 +108,7 @@ func BuildChildPhysicalProps(
 			}
 		}
 
-	case opt.IndexJoinOp:
+	case opt.IndexJoinOp, opt.LockOp:
 		// For an index join, every input row results in exactly one output row.
 		childProps.LimitHint = parentProps.LimitHint
 
@@ -233,6 +233,9 @@ func BuildChildPhysicalProps(
 // As a result, cases where this limit hint may be poor (too low or more than
 // twice as high as needed) tend to occur when distinctCount is very close to
 // neededRows.
+//
+// TODO(mgartner): This function should probably consider the input row count in
+// order to make more accurate estimates. See streamingGroupByInputLimitHint.
 func distinctOnLimitHint(distinctCount, neededRows float64) float64 {
 	// The harmonic function below is not intended for values under 1 (for one,
 	// it's not monotonic until 0.5); make sure we never return negative results.
@@ -304,20 +307,20 @@ func init() {
 		lookupJoin *memo.LookupJoinExpr,
 		required *physical.Required,
 		optimizer interface{},
-	) (physicalDistribution physical.Distribution) {
+	) physical.Distribution {
 		if optimizer == nil {
-			return physicalDistribution
+			return physical.Distribution{}
 		}
 		o, ok := optimizer.(*Optimizer)
-		if !ok {
-			return physicalDistribution
+		if !ok || o.mem == nil || !o.mem.IsOptimized() {
+			return physical.Distribution{}
 		}
 		if o.evalCtx == nil {
-			return physicalDistribution
+			return physical.Distribution{}
 		}
-		_, physicalDistribution = distribution.BuildLookupJoinLookupTableDistribution(
-			o.ctx, o.evalCtx, lookupJoin, required, o.MaybeGetBestCostRelation,
+		_, d := distribution.BuildLookupJoinLookupTableDistribution(
+			o.ctx, o.evalCtx, o.mem, lookupJoin, required, o.MaybeGetBestCostRelation,
 		)
-		return physicalDistribution
+		return d
 	}
 }

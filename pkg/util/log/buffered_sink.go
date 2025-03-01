@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -84,17 +79,25 @@ type bufferFmtConfig struct {
 }
 
 func newBufferFmtConfig(bufferFmt *logconfig.BufferFormat) *bufferFmtConfig {
-	fmtType := logconfig.BufferFormat("newline")
-	if bufferFmt != nil {
-		fmtType = *bufferFmt
+	// Use newline by default.
+	cfg := bufferFmtConfig{delimiter: "\n", fmtType: logconfig.BufferFmtNewline}
+	if bufferFmt == nil {
+		return &cfg
 	}
 
-	cfg := bufferFmtConfig{delimiter: "\n", fmtType: fmtType}
-
-	if fmtType == logconfig.BufferFmtJsonArray {
-		cfg.suffix = "]"
-		cfg.prefix = "["
+	switch *bufferFmt {
+	case logconfig.BufferFmtNewline:
+		// Do nothing, we'll return the default cfg after.
+	case logconfig.BufferFmtJsonArray:
+		cfg.fmtType = logconfig.BufferFmtJsonArray
 		cfg.delimiter = ","
+		cfg.prefix = "["
+		cfg.suffix = "]"
+	case logconfig.BufferFmtNone:
+		cfg.fmtType = logconfig.BufferFmtNone
+		cfg.delimiter = ""
+	default:
+		panic(errors.AssertionFailedf("unknown BufferFormat: %v", *bufferFmt))
 	}
 
 	return &cfg
@@ -322,6 +325,7 @@ func (bs *bufferedSink) exitCode() exit.Code {
 // See: https://github.com/cockroachdb/cockroach/issues/72458
 func (bs *bufferedSink) runFlusher(stopC <-chan struct{}) {
 	buf := &bs.mu.buf
+	loggingErr := Every(time.Minute)
 	for {
 		done := false
 		select {
@@ -350,7 +354,9 @@ func (bs *bufferedSink) runFlusher(stopC <-chan struct{}) {
 		if errC != nil {
 			errC <- err
 		} else if err != nil {
-			Ops.Errorf(context.Background(), "logging error from %T: %v", bs.child, err)
+			if loggingErr.ShouldLog() {
+				Ops.Errorf(context.Background(), "logging error from %T: %v", bs.child, err)
+			}
 			if bs.crashOnAsyncFlushFailure {
 				f := func() func(exit.Code, error) {
 					logging.mu.Lock()
@@ -486,10 +492,9 @@ func (b *msgBuf) concatMessages(prefix string, suffix string, delimiter string) 
 }
 
 func (b *msgBuf) dropFirstMsg() {
-	// TODO(knz): This needs to get reported somehow, see
-	// https://github.com/cockroachdb/cockroach/issues/72453
 	firstMsg := b.messages[0]
 	b.messages = b.messages[1:]
 	b.sizeBytes -= uint64(firstMsg.Len())
+	logging.metrics.IncrementCounter(BufferedSinkMessagesDropped, 1)
 	putBuffer(firstMsg)
 }

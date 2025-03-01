@@ -1,18 +1,14 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttljob_test
 
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,9 +21,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/ttl/ttlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/ttl/ttljob"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
+	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
+	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
+	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -292,13 +292,12 @@ func TestSelectQueryBuilder(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
 			ctx := context.Background()
-			testCluster := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
-			defer testCluster.Stopper().Stop(ctx)
+			srv := serverutils.StartServerOnly(t, base.TestServerArgs{})
+			defer srv.Stopper().Stop(ctx)
 
-			testServer := testCluster.Server(0)
-			ie := testServer.InternalExecutor().(*sql.InternalExecutor)
+			ie := srv.ApplicationLayer().InternalExecutor().(*sql.InternalExecutor)
 
-			// Generate pkColNames.
+			// Generate PKColNames.
 			pkColDirs := tc.pkColDirs
 			numPKCols := len(pkColDirs)
 			pkColNames := ttlbase.GenPKColNames(numPKCols)
@@ -333,14 +332,22 @@ func TestSelectQueryBuilder(t *testing.T) {
 
 			// Setup SelectQueryBuilder.
 			queryBuilder := ttljob.MakeSelectQueryBuilder(
+				ttljob.SelectQueryParams{
+					RelationName:    relationName,
+					PKColNames:      pkColNames,
+					PKColDirs:       pkColDirs,
+					Bounds:          tc.bounds,
+					AOSTDuration:    0,
+					SelectBatchSize: 2,
+					TTLExpr:         ttlColName,
+					SelectDuration:  testHistogram(),
+					SelectRateLimiter: quotapool.NewRateLimiter(
+						"",
+						quotapool.Inf(),
+						math.MaxInt64,
+					),
+				},
 				cutoff,
-				pkColNames,
-				pkColDirs,
-				relationName,
-				tc.bounds,
-				0,
-				2,
-				ttlColName,
 			)
 
 			// Verify queryBuilder iterations.
@@ -410,15 +417,14 @@ func TestDeleteQueryBuilder(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
 			ctx := context.Background()
+			srv := serverutils.StartServerOnly(t, base.TestServerArgs{})
+			defer srv.Stopper().Stop(ctx)
+			s := srv.ApplicationLayer()
 
-			testCluster := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
-			defer testCluster.Stopper().Stop(ctx)
+			ie := s.InternalExecutor().(*sql.InternalExecutor)
+			db := s.InternalDB().(*sql.InternalDB)
 
-			testServer := testCluster.Server(0)
-			ie := testServer.InternalExecutor().(*sql.InternalExecutor)
-			db := testServer.InternalDB().(*sql.InternalDB)
-
-			// Generate pkColNames.
+			// Generate PKColNames.
 			numPKCols := tc.numPKCols
 			pkColNames := ttlbase.GenPKColNames(numPKCols)
 
@@ -446,11 +452,19 @@ func TestDeleteQueryBuilder(t *testing.T) {
 
 			// Setup DeleteQueryBuilder.
 			queryBuilder := ttljob.MakeDeleteQueryBuilder(
+				ttljob.DeleteQueryParams{
+					RelationName:    relationName,
+					PKColNames:      pkColNames,
+					DeleteBatchSize: 2,
+					TTLExpr:         ttlColName,
+					DeleteDuration:  testHistogram(),
+					DeleteRateLimiter: quotapool.NewRateLimiter(
+						"",
+						quotapool.Inf(),
+						math.MaxInt64,
+					),
+				},
 				cutoff,
-				pkColNames,
-				relationName,
-				2, /* deleteBatchSize */
-				ttlColName,
 			)
 
 			// Verify rows are deleted.
@@ -468,5 +482,73 @@ func TestDeleteQueryBuilder(t *testing.T) {
 			)
 			require.NoError(t, err)
 		})
+	}
+}
+
+func testHistogram() *aggmetric.Histogram {
+	return aggmetric.MakeBuilder().Histogram(metric.HistogramOptions{
+		SigFigs: 1,
+	}).AddChild()
+}
+
+// BenchmarkTTLExpiration will benchmark the performance of queries that mimic
+// the different kinds of TTL expiration expressions.
+func BenchmarkTTLExpiration(b *testing.B) {
+	defer log.Scope(b).Close(b)
+
+	ctx := context.Background()
+	srv, db, _ := serverutils.StartServer(b, base.TestServerArgs{})
+	defer srv.Stopper().Stop(ctx)
+
+	tdb := sqlutils.MakeSQLRunner(db)
+	tdb.ExecMultiple(b,
+		"create database db1",
+		"create table db1.t1 (created_at timestamptz, expired_at timestamptz)",
+	)
+	// We are ingesting data. But we pick a timestamp so that the queries we do
+	// below don't return any rows. We don't want the process of returning rows to
+	// throw off the benchmark. We insert rows in batches to speed up the test
+	// setup.
+	const numRows = 250000
+	const batchSize = 10000
+	for i := 0; i < numRows; i += batchSize {
+		tdb.Exec(b, fmt.Sprintf(`
+        INSERT INTO db1.t1 (created_at, expired_at)
+        SELECT now(), now() + interval '10 months' + generate_series(%d, %d) * interval '1 second'
+    `, i, i+batchSize-1))
+	}
+
+	for _, tc := range []struct {
+		desc  string
+		query string
+	}{
+		{
+			desc: "query=tz_conv",
+			// This is the query that is very similar to what we only supported with
+			// TTL expressions up until 23.2
+			query: "select * from db1.t1 where (created_at AT TIME ZONE 'utc' + INTERVAL '6 months') AT TIME ZONE 'utc' > expired_at",
+		},
+		{
+			desc: "query=interval_math",
+			// In version 23.2, support was added for TTL expressions that use
+			// TIMESTAMPTZ + INTERVAL. This improvement eliminates the need to
+			// convert the time into a specific time zone, as was previously
+			// required.
+			query: "select * from db1.t1 where created_at + interval '6 months' > expired_at",
+		},
+	} {
+		// Execute the query once outside the timings to prime any caches.
+		tdb.Exec(b, tc.query)
+
+		b.Run(tc.desc, func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				// Execute the query on the table. The actual results are irrelevant, as there
+				// shouldn't be any rows. We're only interested in measuring the execution time.
+				tdb.Exec(b, tc.query)
+			}
+			b.StopTimer()
+		})
+
 	}
 }

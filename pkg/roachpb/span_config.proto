@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.roachpb;
@@ -179,6 +174,11 @@ message SpanConfig {
   //   (exceeds the implicit or explicit NumReplicas), then voters by
   //   themselves will not over-satisfy any ConstraintsConjunction in
   //   Constraints.
+  //
+  // Additionally, we require that Constraints is not under-specified compared
+  // to VoterConstraints. That is, if there is a ConstraintsConjunction in
+  // VoterConstraints, there is a corresponding ConstraintsConjunction in
+  // Constraints that has NumReplicas at least that of VoterConstraints.
   //
   // For existing clusters, these strictness requirements may not be met, so
   // internally the system tries to do a normalization to meet the strictness

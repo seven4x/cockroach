@@ -1,24 +1,17 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gen
 
 import (
 	"fmt"
 	"math/rand"
-	"sort"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/config"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/event"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/metrics"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/state"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/workload"
@@ -48,6 +41,7 @@ type ClusterGen interface {
 	// and simulation settings provided.
 	Generate(seed int64, settings *config.SimulationSettings) state.State
 	String() string
+	Regions() []state.Region
 }
 
 // RangeGen provides a method to generate the initial range splits, range
@@ -57,15 +51,6 @@ type RangeGen interface {
 	// simulation settings provided. In the updated state, ranges will have been
 	// created, replicas and leases assigned to stores in the cluster.
 	Generate(seed int64, settings *config.SimulationSettings, s state.State) state.State
-	String() string
-}
-
-// EventGen provides a  method to generate a list of events that will apply to
-// the simulated cluster. Currently, only delayed (fixed time) events are
-// supported.
-type EventGen interface {
-	// Generate returns a list of events, which should be exectued at the delay specified.
-	Generate(seed int64) event.DelayedEventList
 	String() string
 }
 
@@ -83,13 +68,14 @@ func GenerateSimulation(
 	settings := settingsGen.Generate(seed)
 	s := clusterGen.Generate(seed, &settings)
 	s = rangeGen.Generate(seed, &settings, s)
+	eventExecutor := eventGen.Generate(seed, &settings)
 	return asim.NewSimulator(
 		duration,
 		loadGen.Generate(seed, &settings),
 		s,
 		&settings,
 		metrics.NewTracker(settings.MetricsInterval),
-		eventGen.Generate(seed)...,
+		eventExecutor,
 	)
 }
 
@@ -171,6 +157,10 @@ func (lc LoadedCluster) String() string {
 	return fmt.Sprintf("loaded cluster with\n %v", lc.Info)
 }
 
+func (lc LoadedCluster) Regions() []state.Region {
+	return lc.Info.Regions
+}
+
 // BasicCluster implements the ClusterGen interace.
 type BasicCluster struct {
 	Nodes         int
@@ -188,6 +178,11 @@ func (bc BasicCluster) String() string {
 func (bc BasicCluster) Generate(seed int64, settings *config.SimulationSettings) state.State {
 	info := state.ClusterInfoWithStoreCount(bc.Nodes, bc.StoresPerNode)
 	return state.LoadClusterInfo(info, settings)
+}
+
+func (bc BasicCluster) Regions() []state.Region {
+	info := state.ClusterInfoWithStoreCount(bc.Nodes, bc.StoresPerNode)
+	return info.Regions
 }
 
 // LoadedRanges implements the RangeGen interface.
@@ -315,21 +310,4 @@ func (br BasicRanges) Generate(
 	rangesInfo := br.GetRangesInfo(br.PlacementType, len(s.Stores()), nil, []float64{})
 	br.LoadRangeInfo(s, rangesInfo)
 	return s
-}
-
-// StaticEvents implements the EventGen interface.
-// TODO(kvoli): introduce conditional events.
-type StaticEvents struct {
-	DelayedEvents event.DelayedEventList
-}
-
-func (se StaticEvents) String() string {
-	return fmt.Sprintf("number of static events generated=%d", len(se.DelayedEvents))
-}
-
-// Generate returns a list of events, exactly the same as the events
-// StaticEvents was created with.
-func (se StaticEvents) Generate(seed int64) event.DelayedEventList {
-	sort.Sort(se.DelayedEvents)
-	return se.DelayedEvents
 }

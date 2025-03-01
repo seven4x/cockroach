@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlexec_test
 
@@ -22,7 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
 	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
@@ -49,7 +44,7 @@ func TestRunQuery(t *testing.T) {
 	c := cli.NewCLITest(cli.TestCLIParams{T: t})
 	defer c.Cleanup()
 
-	url, cleanup := sqlutils.PGUrl(t, c.Server.AdvSQLAddr(), t.Name(), url.User(username.RootUser))
+	url, cleanup := pgurlutils.PGUrl(t, c.Server.AdvSQLAddr(), t.Name(), url.User(username.RootUser))
 	defer cleanup()
 
 	conn := makeSQLConn(url.String())
@@ -179,7 +174,7 @@ func TestUtfName(t *testing.T) {
 	c := cli.NewCLITest(cli.TestCLIParams{T: t})
 	defer c.Cleanup()
 
-	url, cleanup := sqlutils.PGUrl(t, c.Server.AdvSQLAddr(), t.Name(), url.User(username.RootUser))
+	url, cleanup := pgurlutils.PGUrl(t, c.Server.AdvSQLAddr(), t.Name(), url.User(username.RootUser))
 	defer cleanup()
 
 	conn := makeSQLConn(url.String())

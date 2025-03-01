@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package querylog
 
@@ -134,6 +129,9 @@ func (*querylog) Meta() workload.Meta { return querylogMeta }
 // Flags implements the Flagser interface.
 func (w *querylog) Flags() workload.Flags { return w.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (w *querylog) ConnFlags() *workload.ConnFlags { return w.connFlags }
+
 // Tables implements the Generator interface.
 func (*querylog) Tables() []workload.Table {
 	// Assume the necessary tables are already present.
@@ -173,10 +171,6 @@ func (w *querylog) Hooks() workload.Hooks {
 func (w *querylog) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -211,7 +205,7 @@ func (w *querylog) Ops(
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	if w.querybenchPath != `` {
 		conn, err := pgx.ConnectConfig(ctx, connCfg)
 		if err != nil {
@@ -743,6 +737,7 @@ func (w *querylog) getColumnsInfo(db *gosql.DB) (retErr error) {
 		if err != nil {
 			return err
 		}
+		//nolint:deferloop TODO(#137605)
 		defer func(rows *gosql.Rows) {
 			retErr = errors.CombineErrors(retErr, rows.Close())
 		}(rows)
@@ -774,6 +769,7 @@ WHERE attrelid=$1`, relid)
 		if err != nil {
 			return err
 		}
+		//nolint:deferloop TODO(#137605)
 		defer func(rows *gosql.Rows) {
 			retErr = errors.CombineErrors(retErr, rows.Close())
 		}(rows)
@@ -857,6 +853,7 @@ func (w *querylog) populateSamples(ctx context.Context, db *gosql.DB) (retErr er
 		if err != nil {
 			return err
 		}
+		//nolint:deferloop TODO(#137605)
 		defer func() { retErr = errors.CombineErrors(retErr, samples.Close()) }()
 		for samples.Next() {
 			rowOfSamples := make([]interface{}, len(cols))
