@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ordering
 
@@ -179,7 +174,7 @@ func TestLookupJoinProvided(t *testing.T) {
 				},
 			)
 			req := props.ParseOrderingChoice(tc.required)
-			res := lookupJoinBuildProvided(lookupJoin, &req).String()
+			res := lookupJoinBuildProvided(f.Memo(), lookupJoin, &req).String()
 			if res != tc.provided {
 				t.Errorf("expected '%s', got '%s'", tc.provided, res)
 			}
@@ -363,7 +358,7 @@ func TestLookupJoinCanProvide(t *testing.T) {
 				},
 			)
 			req := props.ParseOrderingChoice(tc.required)
-			canProvide := lookupJoinCanProvideOrdering(lookupJoin, &req)
+			canProvide := lookupJoinCanProvideOrdering(f.Memo(), lookupJoin, &req)
 			if canProvide != tc.canProvide {
 				t.Errorf(errorString(tc.canProvide), req)
 			}

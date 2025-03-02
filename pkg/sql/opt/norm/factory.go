@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package norm implements normalization for queries.
 package norm
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
+	"github.com/cockroachdb/cockroach/pkg/util/sentryutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -135,6 +131,9 @@ func (f *Factory) Init(ctx context.Context, evalCtx *eval.Context, catalog cat.C
 		mem = &memo.Memo{}
 	}
 	mem.Init(ctx, evalCtx)
+	mem.SetReplacer(func(e opt.Expr, replace memo.ReplaceFunc) opt.Expr {
+		return f.Replace(e, ReplaceFunc(replace))
+	})
 
 	// This initialization pattern ensures that fields are not unwittingly
 	// reused. Field reuse must be explicit.
@@ -263,10 +262,10 @@ func (f *Factory) EvalContext() *eval.Context {
 }
 
 // CopyAndReplace builds this factory's memo by constructing a copy of a subtree
-// that is part of another memo. That memo's metadata is copied to this
-// factory's memo so that tables and columns referenced by the copied memo can
-// keep the same ids. The copied subtree becomes the root of the destination
-// memo, having the given physical properties.
+// that is part of another memo. fromMemo's metadata is copied to this factory's
+// memo so that tables and columns referenced by the copied memo can keep the
+// same ids. The copied subtree becomes the root of the destination memo, having
+// the given physical properties.
 //
 // The "replace" callback function allows the caller to override the default
 // traversal and cloning behavior with custom logic. It is called for each node
@@ -289,15 +288,29 @@ func (f *Factory) EvalContext() *eval.Context {
 //	  return f.CopyAndReplaceDefault(e, replaceFn)
 //	}
 //
-//	f.CopyAndReplace(from, fromProps, replaceFn)
+//	f.CopyAndReplace(fromMemo, from, fromProps, replaceFn)
 //
 // NOTE: Callers must take care to always create brand new copies of non-
 // singleton source nodes rather than referencing existing nodes. The source
 // memo should always be treated as immutable, and the destination memo must be
 // completely independent of it once CopyAndReplace has completed.
 func (f *Factory) CopyAndReplace(
-	from memo.RelExpr, fromProps *physical.Required, replace ReplaceFunc,
+	fromMemo *memo.Memo, from memo.RelExpr, fromProps *physical.Required, replace ReplaceFunc,
 ) {
+	opt.MaybeInjectOptimizerTestingPanic(f.ctx, f.evalCtx)
+
+	f.CopyMetadataFrom(fromMemo)
+
+	// Perform copy and replacement, and store result as the root of this
+	// factory's memo.
+	to := f.invokeReplace(from, replace).(memo.RelExpr)
+	f.Memo().SetRoot(to, fromProps)
+}
+
+// CopyMetadataFrom copies the metadata from the given memo to this factory's
+// memo. This allows expressions copied from the original memo to reference the
+// same tables and columns that they did before.
+func (f *Factory) CopyMetadataFrom(from *memo.Memo) {
 	opt.MaybeInjectOptimizerTestingPanic(f.ctx, f.evalCtx)
 
 	if !f.mem.IsEmpty() {
@@ -307,18 +320,17 @@ func (f *Factory) CopyAndReplace(
 	// Copy the next scalar rank to the target memo so that new scalar
 	// expressions built with the new memo will not share scalar ranks with
 	// existing expressions.
-	f.mem.CopyNextRankFrom(from.Memo())
+	f.mem.CopyNextRankFrom(from)
+
+	// Copy the next With ID to the target memo so that new CTE expressions built
+	// with the new memo will not share With IDs with existing expressions.
+	f.mem.CopyNextWithIDFrom(from)
 
 	// Copy all metadata to the target memo so that referenced tables and
 	// columns can keep the same ids they had in the "from" memo. Scalar
 	// expressions in the metadata cannot have placeholders, so we simply copy
 	// the expressions without replacement.
-	f.mem.Metadata().CopyFrom(from.Memo().Metadata(), f.CopyWithoutAssigningPlaceholders)
-
-	// Perform copy and replacement, and store result as the root of this
-	// factory's memo.
-	to := f.invokeReplace(from, replace).(memo.RelExpr)
-	f.Memo().SetRoot(to, fromProps)
+	f.mem.Metadata().CopyFrom(from.Metadata(), f.CopyWithoutAssigningPlaceholders)
 }
 
 // CopyWithoutAssigningPlaceholders returns a copy of the given scalar expression.
@@ -351,38 +363,44 @@ func (f *Factory) AssignPlaceholders(from *memo.Memo) (err error) {
 	// the copy proceeds.
 	var replaceFn ReplaceFunc
 	replaceFn = func(e opt.Expr) opt.Expr {
-		if placeholder, ok := e.(*memo.PlaceholderExpr); ok {
+		switch t := e.(type) {
+		case *memo.PlaceholderExpr:
 			d, err := eval.Expr(f.ctx, f.evalCtx, e.(*memo.PlaceholderExpr).Value)
 			if err != nil {
 				panic(err)
 			}
-			return f.ConstructConstVal(d, placeholder.DataType())
-		}
-		// A recursive CTE may have the stats change on its Initial expression
-		// after placeholder assignment, if that happens we need to
-		// propagate that change to the Binding expression and rebuild
-		// everything.
-		if rcte, ok := e.(*memo.RecursiveCTEExpr); ok {
-			newInitial := f.CopyAndReplaceDefault(rcte.Initial, replaceFn).(memo.RelExpr)
-			if newInitial != rcte.Initial {
+			return f.ConstructConstVal(d, t.DataType())
+		case *memo.UDFCallExpr:
+			// Statements in the body of a UDF cannot have placeholders, but
+			// they must be copied so that they reference the new memo.
+			for i := range t.Def.Body {
+				t.Def.Body[i] = f.CopyAndReplaceDefault(t.Def.Body[i], replaceFn).(memo.RelExpr)
+			}
+		case *memo.RecursiveCTEExpr:
+			// A recursive CTE may have the stats change on its Initial expression
+			// after placeholder assignment, if that happens we need to
+			// propagate that change to the Binding expression and rebuild
+			// everything.
+			newInitial := f.CopyAndReplaceDefault(t.Initial, replaceFn).(memo.RelExpr)
+			if newInitial != t.Initial {
 				newBinding := f.ConstructFakeRel(&memo.FakeRelPrivate{
 					Props: MakeBindingPropsForRecursiveCTE(
-						props.AnyCardinality, rcte.Binding.Relational().OutputCols,
+						props.AnyCardinality, t.Binding.Relational().OutputCols,
 						newInitial.Relational().Statistics().RowCount)})
-				if id := rcte.WithBindingID(); id != 0 {
+				if id := t.WithBindingID(); id != 0 {
 					f.Metadata().AddWithBinding(id, newBinding)
 				}
 				return f.ConstructRecursiveCTE(
 					newBinding,
 					newInitial,
-					f.invokeReplace(rcte.Recursive, replaceFn).(memo.RelExpr),
-					&rcte.RecursiveCTEPrivate,
+					f.invokeReplace(t.Recursive, replaceFn).(memo.RelExpr),
+					&t.RecursiveCTEPrivate,
 				)
 			}
 		}
 		return f.CopyAndReplaceDefault(e, replaceFn)
 	}
-	f.CopyAndReplace(from.RootExpr().(memo.RelExpr), from.RootProps(), replaceFn)
+	f.CopyAndReplace(from, from.RootExpr().(memo.RelExpr), from.RootProps(), replaceFn)
 
 	return nil
 }
@@ -411,7 +429,7 @@ func (f *Factory) onMaxConstructorStackDepthExceeded() {
 	if buildutil.CrdbTestBuild {
 		panic(err)
 	}
-	errorutil.SendReport(f.ctx, &f.evalCtx.Settings.SV, err)
+	sentryutil.SendReport(f.ctx, &f.evalCtx.Settings.SV, err)
 }
 
 // onConstructRelational is called as a final step by each factory method that
@@ -458,6 +476,14 @@ func (f *Factory) onConstructScalar(scalar opt.ScalarExpr) opt.ScalarExpr {
 // columns. It is used to create a dummy input for operators like CreateTable.
 func (f *Factory) ConstructZeroValues() memo.RelExpr {
 	return f.ConstructValues(memo.EmptyScalarListExpr, &memo.ValuesPrivate{
+		Cols: opt.ColList{},
+		ID:   f.Metadata().NextUniqueID(),
+	})
+}
+
+// ConstructNoColsRow constructs a Values operator with no columns and one row.
+func (f *Factory) ConstructNoColsRow() memo.RelExpr {
+	return f.ConstructValues(memo.ScalarListWithEmptyTuple, &memo.ValuesPrivate{
 		Cols: opt.ColList{},
 		ID:   f.Metadata().NextUniqueID(),
 	})

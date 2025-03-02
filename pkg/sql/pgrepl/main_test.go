@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgrepl
 
@@ -19,18 +14,18 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/ccl"
 	"github.com/cockroachdb/cockroach/pkg/security/securityassets"
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/datadriven"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +34,6 @@ import (
 func TestMain(m *testing.M) {
 	securityassets.SetLoader(securitytest.EmbeddedAssets)
 	serverutils.InitTestServerFactory(server.TestServerFactory)
-	defer ccl.TestingEnableEnterprise()()
 	os.Exit(m.Run())
 }
 
@@ -50,7 +44,7 @@ func TestDataDriven(t *testing.T) {
 	s := serverutils.StartServerOnly(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(context.Background())
 
-	pgURL, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "pgrepl_datadriven_test", url.User(username.RootUser))
+	pgURL, cleanup := pgurlutils.PGUrl(t, s.AdvSQLAddr(), "pgrepl_datadriven_test", url.User(username.RootUser))
 	defer cleanup()
 
 	cfg, err := pgx.ParseConfig(pgURL.String())
@@ -77,7 +71,7 @@ func TestDataDriven(t *testing.T) {
 
 			switch d.Cmd {
 			case "simple_query":
-				rows, err := conn.Query(ctx, d.Input, pgx.QuerySimpleProtocol(true))
+				rows, err := conn.Query(ctx, d.Input, pgx.QueryExecModeSimpleProtocol)
 				if expectError {
 					require.Error(t, err)
 					return err.Error()
@@ -88,7 +82,7 @@ func TestDataDriven(t *testing.T) {
 				return out
 			case "identify_system":
 				// IDENTIFY_SYSTEM needs some redaction to be deterministic.
-				rows, err := conn.Query(ctx, "IDENTIFY_SYSTEM", pgx.QuerySimpleProtocol(true))
+				rows, err := conn.Query(ctx, "IDENTIFY_SYSTEM", pgx.QueryExecModeSimpleProtocol)
 				require.NoError(t, err)
 				var sb strings.Builder
 				for rows.Next() {
@@ -98,13 +92,13 @@ func TestDataDriven(t *testing.T) {
 						if i > 0 {
 							sb.WriteRune('\n')
 						}
-						switch string(rows.FieldDescriptions()[i].Name) {
+						switch rows.FieldDescriptions()[i].Name {
 						case "systemid":
 							val = "some_cluster_id"
 						case "xlogpos":
 							val = "some_lsn"
 						}
-						sb.Write(rows.FieldDescriptions()[i].Name)
+						sb.WriteString(rows.FieldDescriptions()[i].Name)
 						sb.WriteString(": ")
 						sb.WriteString(fmt.Sprintf("%v", val))
 					}

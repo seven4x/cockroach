@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -43,7 +38,7 @@ func (r *sqlStatsCompactionResumer) Resume(ctx context.Context, execCtx interfac
 	p := execCtx.(JobExecContext)
 
 	var (
-		scheduledJobID int64
+		scheduledJobID jobspb.ScheduleID
 		err            error
 	)
 
@@ -53,13 +48,13 @@ func (r *sqlStatsCompactionResumer) Resume(ctx context.Context, execCtx interfac
 			return err
 		}
 
-		if scheduledJobID != jobs.InvalidScheduleID {
+		if scheduledJobID != jobspb.InvalidScheduleID {
 			schedules := jobs.ScheduledJobTxn(txn)
 			r.sj, err = schedules.Load(ctx, scheduledjobs.ProdJobSchedulerEnv, scheduledJobID)
 			if err != nil {
 				return err
 			}
-			r.sj.SetScheduleStatus(string(jobs.StatusRunning))
+			r.sj.SetScheduleStatus(string(jobs.StateRunning))
 
 			return schedules.Update(ctx, r.sj)
 		}
@@ -81,7 +76,7 @@ func (r *sqlStatsCompactionResumer) Resume(ctx context.Context, execCtx interfac
 		ctx,
 		p.ExecCfg().InternalDB,
 		p.ExecCfg().JobsKnobs(),
-		jobs.StatusSucceeded)
+		jobs.StateSucceeded)
 }
 
 // OnFailOrCancel implements the jobs.Resumer interface.
@@ -90,13 +85,18 @@ func (r *sqlStatsCompactionResumer) OnFailOrCancel(
 ) error {
 	p := execCtx.(JobExecContext)
 	execCfg := p.ExecCfg()
-	return r.maybeNotifyJobTerminated(ctx, execCfg.InternalDB, execCfg.JobsKnobs(), jobs.StatusFailed)
+	return r.maybeNotifyJobTerminated(ctx, execCfg.InternalDB, execCfg.JobsKnobs(), jobs.StateFailed)
+}
+
+// CollectProfile implements the jobs.Resumer interface.
+func (r *sqlStatsCompactionResumer) CollectProfile(_ context.Context, _ interface{}) error {
+	return nil
 }
 
 // maybeNotifyJobTerminated will notify the job termination
 // (with termination status).
 func (r *sqlStatsCompactionResumer) maybeNotifyJobTerminated(
-	ctx context.Context, db isql.DB, jobKnobs *jobs.TestingKnobs, status jobs.Status,
+	ctx context.Context, db isql.DB, jobKnobs *jobs.TestingKnobs, status jobs.State,
 ) error {
 	log.Infof(ctx, "sql stats compaction job terminated with status = %s", status)
 	if r.sj == nil {
@@ -115,22 +115,22 @@ func (r *sqlStatsCompactionResumer) maybeNotifyJobTerminated(
 
 func (r *sqlStatsCompactionResumer) getScheduleID(
 	ctx context.Context, txn isql.Txn, env scheduledjobs.JobSchedulerEnv,
-) (scheduleID int64, _ error) {
+) (scheduleID jobspb.ScheduleID, _ error) {
 	row, err := txn.QueryRowEx(ctx, "lookup-sql-stats-schedule", txn.KV(),
 		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf("SELECT created_by_id FROM %s WHERE id=$1 AND created_by_type=$2", env.SystemJobsTableName()),
 		r.job.ID(), jobs.CreatedByScheduledJobs,
 	)
 	if err != nil {
-		return jobs.InvalidScheduleID, errors.Wrap(err, "fail to look up scheduled information")
+		return jobspb.InvalidScheduleID, errors.Wrap(err, "fail to look up scheduled information")
 	}
 
 	if row == nil {
 		// Compaction not triggered by a scheduled job.
-		return jobs.InvalidScheduleID, nil
+		return jobspb.InvalidScheduleID, nil
 	}
 
-	scheduleID = int64(tree.MustBeDInt(row[0]))
+	scheduleID = jobspb.ScheduleID(tree.MustBeDInt(row[0]))
 	return scheduleID, nil
 }
 
@@ -188,7 +188,7 @@ func (e *scheduledSQLStatsCompactionExecutor) createSQLStatsCompactionJob(
 
 	_, err :=
 		persistedsqlstats.CreateCompactionJob(ctx, &jobs.CreatedByInfo{
-			ID:   sj.ScheduleID(),
+			ID:   int64(sj.ScheduleID()),
 			Name: jobs.CreatedByScheduledJobs,
 		}, txn, p.(*planner).ExecCfg().JobRegistry)
 
@@ -204,18 +204,18 @@ func (e *scheduledSQLStatsCompactionExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus jobs.Status,
+	jobStatus jobs.State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	sj *jobs.ScheduledJob,
 ) error {
-	if jobStatus == jobs.StatusFailed {
+	if jobStatus == jobs.StateFailed {
 		jobs.DefaultHandleFailedRun(sj, "sql stats compaction %d failed", jobID)
 		e.metrics.NumFailed.Inc(1)
 		return nil
 	}
 
-	if jobStatus == jobs.StatusSucceeded {
+	if jobStatus == jobs.StateSucceeded {
 		e.metrics.NumSucceeded.Inc(1)
 	}
 

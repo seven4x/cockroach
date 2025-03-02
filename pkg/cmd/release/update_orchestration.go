@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -23,8 +18,20 @@ import (
 func updateOrchestration(gitDir string, version string) error {
 	// make sure we have the leading "v" in the version
 	version = "v" + strings.TrimPrefix(version, "v")
-	templatesDir := path.Join(gitDir, "cloud/kubernetes/templates")
-	outputDir := path.Join(gitDir, "cloud/kubernetes")
+	// Switch to the git directory to prevent file prefixes in the generated templates.
+	currDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting current directory: %w", err)
+	}
+	if err := os.Chdir(gitDir); err != nil {
+		return fmt.Errorf("switching to git directory: %w", err)
+	}
+	defer func() {
+		_ = os.Chdir(currDir)
+	}()
+
+	const templatesDir = "cloud/kubernetes/templates"
+	const outputDir = "cloud/kubernetes"
 	dirInfo, err := os.Stat(templatesDir)
 	if err != nil {
 		return fmt.Errorf("cannot stat templates directory: %w", err)

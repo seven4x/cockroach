@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"github.com/lib/pq/oid"
@@ -374,7 +370,9 @@ func (c *CustomFuncs) foldOIDFamilyCast(
 			}
 
 			c.mem.Metadata().AddDependency(opt.DepByName(&resName), ds, privilege.SELECT)
-			dOid = tree.NewDOidWithName(oid.Oid(ds.PostgresDescriptorID()), types.RegClass, string(tn.ObjectName))
+			dOid = tree.NewDOidWithTypeAndName(
+				oid.Oid(ds.PostgresDescriptorID()), types.RegClass, string(tn.ObjectName),
+			)
 
 		default:
 			return nil, false, nil
@@ -671,10 +669,11 @@ func (c *CustomFuncs) FoldFunction(
 	if c.f.evalCtx != nil && c.f.catalog != nil { // Some tests leave those unset.
 		unresolved := tree.MakeUnresolvedName(private.Name)
 		def, err := c.f.catalog.ResolveFunction(
-			context.Background(), &unresolved,
+			context.Background(), tree.MakeUnresolvedFunctionName(&unresolved),
 			&c.f.evalCtx.SessionData().SearchPath)
 		if err != nil {
-			panic(errors.AssertionFailedf("function %s() not defined", redact.Safe(private.Name)))
+			log.Warningf(c.f.ctx, "function %s() not defined: %v", redact.Safe(private.Name), err)
+			return nil, false
 		}
 		funcRef = tree.ResolvableFunctionReference{FunctionReference: def}
 	} else {

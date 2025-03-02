@@ -1,18 +1,14 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -21,6 +17,8 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 )
+
+const remoteOrigin = "origin"
 
 type releaseInfo struct {
 	prevReleaseVersion string
@@ -55,7 +53,7 @@ func findNextRelease(releaseSeries string) (releaseInfo, error) {
 	if err != nil {
 		return releaseInfo{}, fmt.Errorf("cannot bump version: %w", err)
 	}
-	candidateCommits, err := findCandidateCommits(prevReleaseVersion, releaseSeries)
+	candidateCommits, err := findCandidateCommits(prevReleaseVersion, nextReleaseVersion)
 	if err != nil {
 		return releaseInfo{}, fmt.Errorf("cannot find candidate commits: %w", err)
 	}
@@ -216,10 +214,44 @@ func getCommonBaseRef(fromRef, toRef string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// findReleaseBranch finds the release branch for a version based on a list of branch patterns.
+func findReleaseBranch(version string) (string, error) {
+	semVersion, err := parseVersion(version)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse version %s: %w", version, err)
+	}
+	// List of potential release branches by their priority. The first found will be used as the release branch.
+	maybeReleaseBranches := []string{
+		// staging-vx.y.z is usually used by extraordinary releases. Top priority.
+		fmt.Sprintf("staging-v%d.%d.%d", semVersion.Major(), semVersion.Minor(), semVersion.Patch()),
+		// release-x.y.z-rc us used by baking releases.
+		fmt.Sprintf("release-%d.%d.%d-rc", semVersion.Major(), semVersion.Minor(), semVersion.Patch()),
+		fmt.Sprintf("release-%d.%d", semVersion.Major(), semVersion.Minor()),
+		// TODO: add master for alphas
+	}
+	for _, branch := range maybeReleaseBranches {
+		remoteBranches, err := listRemoteBranches(branch)
+		if err != nil {
+			return "", fmt.Errorf("listing release branch %s: %w", branch, err)
+		}
+		if len(remoteBranches) > 1 {
+			return "", fmt.Errorf("found more than one release branches for %s: %s", branch, strings.Join(remoteBranches, ", "))
+		}
+		if len(remoteBranches) > 0 {
+			return remoteBranches[0], nil
+		}
+	}
+	return "", fmt.Errorf("cannot find release branch for %s", version)
+}
+
 // findCandidateCommits finds all potential merge commits that can be used for the current release.
 // It includes all merge commits since previous release.
-func findCandidateCommits(prevRelease string, releaseSeries string) ([]string, error) {
-	releaseBranch := fmt.Sprintf("origin/release-%s", releaseSeries)
+func findCandidateCommits(prevRelease string, version string) ([]string, error) {
+	releaseBranch, err := findReleaseBranch(version)
+	if err != nil {
+		return []string{}, fmt.Errorf("cannot find release branch for %s", version)
+	}
+	releaseBranch = fmt.Sprintf("%s/%s", remoteOrigin, releaseBranch)
 	commonBaseRef, err := getCommonBaseRef(prevRelease, releaseBranch)
 	if err != nil {
 		return []string{}, fmt.Errorf("cannot find common base ref: %w", err)
@@ -249,12 +281,38 @@ func findHealthyBuild(potentialRefs []string) (buildInfo, error) {
 	return buildInfo{}, fmt.Errorf("no ref found")
 }
 
-// remoteBranchExists checks if a branch exists in a remote repository, assuming the remote name is `origin`.
-func remoteBranchExists(branch string) (bool, error) {
-	cmd := exec.Command("git", "ls-remote", "--refs", "origin", "refs/heads/"+branch)
+// listRemoteBranches retrieves a list of remote branches using a pattern, assuming the remote name is `origin`.
+func listRemoteBranches(pattern string) ([]string, error) {
+	cmd := exec.Command("git", "ls-remote", "--refs", remoteOrigin, "refs/heads/"+pattern)
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("git ls-remote: %w", err)
+		return []string{}, fmt.Errorf("git ls-remote: %w", err)
+	}
+	log.Printf("git ls-remote returned: %s", out)
+	var remoteBranches []string
+	// Example output:
+	// $ git ls-remote origin "refs/heads/release-23.1*"
+	// 0175d195d544b77b286d56703aa5c9f74fb74367	refs/heads/release-23.1
+	// eee56b2379446c0a115e6d2cd30735a7efe4fad0	refs/heads/release-23.1.12-rc
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return []string{}, fmt.Errorf("cannot find branch specification for %s in `%s`", pattern, line)
+		}
+		remoteBranches = append(remoteBranches, strings.TrimPrefix(fields[1], "refs/heads/"))
+	}
+	return remoteBranches, nil
+}
+
+// fileExistsInGit checks if a file exists in a local repository, assuming the remote name is `origin`.
+func fileExistsInGit(branch string, f string) (bool, error) {
+	cmd := exec.Command("git", "ls-tree", remoteOrigin+"/"+branch, f)
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git ls-tree: %s %s %w, `%s`", branch, f, err, out)
 	}
 	if len(out) == 0 {
 		return false, nil
@@ -262,15 +320,12 @@ func remoteBranchExists(branch string) (bool, error) {
 	return true, nil
 }
 
-// fileExistsInGit checks if a file exists in a local repository, assuming the remote name is `origin`.
-func fileExistsInGit(branch string, f string) (bool, error) {
-	cmd := exec.Command("git", "ls-tree", "origin/"+branch, f)
+// fileContent uses `git cat-file -p ref:file` to get to the file contents without `git checkout`.
+func fileContent(ref string, f string) (string, error) {
+	cmd := exec.Command("git", "cat-file", "-p", ref+":"+f)
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("git ls-tree: %w", err)
+		return "", fmt.Errorf("git cat-file %s:%s: %w, `%s`", ref, f, err, out)
 	}
-	if len(out) == 0 {
-		return false, nil
-	}
-	return true, nil
+	return string(out), nil
 }

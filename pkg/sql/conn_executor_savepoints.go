@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -36,6 +31,7 @@ const commitOnReleaseSavepointName = "cockroach_restart"
 func (ex *connExecutor) execSavepointInOpenState(
 	ctx context.Context, s *tree.Savepoint, res RestrictedCommandResult,
 ) (fsm.Event, fsm.EventPayload, error) {
+	ex.state.mu.hasSavepoints = true
 	savepoints := &ex.extraTxnState.savepoints
 	// Sanity check for "SAVEPOINT cockroach_restart".
 	commitOnRelease := ex.isCommitOnReleaseSavepoint(s.Name)
@@ -186,6 +182,12 @@ func (ex *connExecutor) execRelease(
 		return ev, payload
 	}
 
+	if len(ex.extraTxnState.savepoints) == 0 {
+		// NB: Only RELEASE SAVEPOINT can clear the entire savepoint stack. ROLLBACK
+		// TO SAVEPOINT will always leave at least one savepoint.
+		ex.state.mu.hasSavepoints = false
+	}
+
 	return nil, nil
 }
 
@@ -217,6 +219,7 @@ func (ex *connExecutor) execRollbackToSavepointInOpenState(
 	if entry.kvToken.Initial() {
 		return eventTxnRestart{}, nil
 	}
+
 	// No event is necessary; there's nothing for the state machine to do.
 	return nil, nil
 }

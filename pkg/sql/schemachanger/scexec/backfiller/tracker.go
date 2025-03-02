@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package backfiller
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
@@ -104,7 +100,7 @@ func newTrackerConfig(codec keys.SQLCodec, rc RangeCounter, job *jobs.Job) track
 			if err := job.NoTxn().FractionProgressed(
 				ctx, jobs.FractionUpdater(fractionProgressed),
 			); err != nil {
-				return jobs.SimplifyInvalidStatusError(err)
+				return jobs.SimplifyInvalidStateError(err)
 			}
 			return nil
 		},
@@ -221,9 +217,14 @@ func (b *Tracker) SetMergeProgress(ctx context.Context, progress scexec.MergePro
 // FlushFractionCompleted is part of the scexec.BackfillerProgressFlusher interface.
 func (b *Tracker) FlushFractionCompleted(ctx context.Context) error {
 	updated, fractionRangesFinished, err := b.getFractionRangesFinished(ctx)
-	if err != nil || !updated {
+	if err != nil {
 		return err
 	}
+	if !updated {
+		log.VInfof(ctx, 2, "backfill has no fraction completed to flush")
+		return nil
+	}
+	log.Infof(ctx, "backfill fraction completed is %.3f / 1.000", fractionRangesFinished)
 	return b.writeProgressFraction(ctx, fractionRangesFinished)
 }
 
@@ -231,6 +232,7 @@ func (b *Tracker) FlushFractionCompleted(ctx context.Context) error {
 func (b *Tracker) FlushCheckpoint(ctx context.Context) error {
 	needsFlush, bps, mps := b.collectProgressForCheckpointFlush()
 	if !needsFlush {
+		log.VInfof(ctx, 2, "backfill has no checkpoint to flush")
 		return nil
 	}
 	sort.Slice(bps, func(i, j int) bool {
@@ -253,6 +255,7 @@ func (b *Tracker) FlushCheckpoint(ctx context.Context) error {
 		}
 		return false
 	})
+	log.Infof(ctx, "writing %d backfill checkpoints and %d merge checkpoints", len(bps), len(mps))
 	return b.writeCheckpoint(ctx, bps, mps)
 }
 

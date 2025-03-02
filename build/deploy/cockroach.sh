@@ -2,13 +2,8 @@
 #
 # Copyright 2021 The Cockroach Authors.
 #
-# Use of this software is governed by the Business Source License
-# included in the file licenses/BSL.txt.
-#
-# As of the Change Date specified in that file, in accordance with
-# the Business Source License, use of this software will be governed
-# by the Apache License, Version 2.0, included in the file
-# licenses/APL.txt.
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
 
 # set -e: If the command returns a non-zero exit status, exit the shell.
 # set -u: errors if an variable is referenced before being set
@@ -199,7 +194,7 @@ process_init_files() {
 
 # run_sql_query is a helper function to run sql queries.
 run_sql_query() {
-  $cockroach_entrypoint sql --url="$(cat server.url)" "$@"
+  $cockroach_entrypoint sql --url="$(cat server.url)" --database="${COCKROACH_DATABASE}" "$@"
 }
 
 # db_already_exists runs a sql query to check if the database already exists.
@@ -298,7 +293,7 @@ _main() {
 set_env_var "COCKROACH_ARGS"
 
 if [[ -n "$COCKROACH_ARGS" ]]; then
-  _main "$COCKROACH_ARGS"
+  _main $COCKROACH_ARGS
 else
   _main "$@"
 fi

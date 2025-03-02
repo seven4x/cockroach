@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
@@ -58,7 +53,7 @@ func TestEvalComparisonExprCaching(t *testing.T) {
 		ctx := eval.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
 		defer ctx.Stop(context.Background())
 		ctx.ReCache = tree.NewRegexpCache(8)
-		typedExpr, err := tree.TypeCheck(context.Background(), expr, nil, types.Any)
+		typedExpr, err := tree.TypeCheck(context.Background(), expr, nil, types.AnyElement)
 		if err != nil {
 			t.Fatalf("%v: %v", d, err)
 		}

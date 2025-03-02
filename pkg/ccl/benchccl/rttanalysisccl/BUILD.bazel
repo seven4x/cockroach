@@ -7,14 +7,9 @@ go_test(
         "bench_test.go",
         "multi_region_bench_test.go",
     ],
-    args = select({
-        "//build/toolchains:use_ci_timeouts": ["-test.timeout=895s"],
-        "//conditions:default": ["-test.timeout=3595s"],
-    }),
     data = glob(["testdata/**"]),
-    exec_properties = {"Pool": "large"},
+    exec_properties = {"test.Pool": "large"},
     shard_count = 16,
-    tags = ["ccl_test"],
     deps = [
         "//pkg/base",
         "//pkg/bench/rttanalysis",
@@ -23,6 +18,7 @@ go_test(
         "//pkg/security/securityassets",
         "//pkg/security/securitytest",
         "//pkg/server",
+        "//pkg/testutils/pgurlutils",
         "//pkg/testutils/serverutils",
         "//pkg/testutils/testcluster",
         "//pkg/util/randutil",

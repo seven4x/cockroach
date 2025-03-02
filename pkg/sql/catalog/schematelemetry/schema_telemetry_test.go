@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schematelemetry_test
 
@@ -81,12 +76,16 @@ func TestSchemaTelemetrySchedule(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	s, db, _ := serverutils.StartServer(t, makeTestServerArgs())
-	defer s.Stopper().Stop(ctx)
+	args := makeTestServerArgs()
+	// 'sql.schema.telemetry.recurrence' setting is settable only by the
+	// operator.
+	args.DefaultTestTenant = base.TestIsSpecificToStorageLayerAndNeedsASystemTenant
+	srv, db, _ := serverutils.StartServer(t, args)
+	defer srv.Stopper().Stop(ctx)
+	s := srv.ApplicationLayer()
 	tdb := sqlutils.MakeSQLRunner(db)
 
-	clusterID := s.ExecutorConfig().(sql.ExecutorConfig).NodeInfo.
-		LogicalClusterID()
+	clusterID := s.ExecutorConfig().(sql.ExecutorConfig).NodeInfo.LogicalClusterID()
 	exp := scheduledjobs.MaybeRewriteCronExpr(clusterID, "@weekly")
 	tdb.CheckQueryResultsRetry(t, qExists, [][]string{{exp, "1"}})
 	tdb.ExecSucceedsSoon(t, qSet)
@@ -178,12 +177,19 @@ UPDATE system.namespace SET id = %d WHERE id = %d;
 
 	// Ensure that our logs are flushed to disk before asserting about log
 	// entries.
-	log.Flush()
+	log.FlushFiles()
 
 	// Ensure that a log line is emitted for each invalid object, with a loose
 	// enforcement of the log structure.
-	errorRE := regexp.MustCompile(`found invalid object with ID \d+: ".+"`)
-	entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 1000, errorRE, log.SelectEditMode(false, false))
+	errorRE := regexp.MustCompile(`found invalid object with ID \d+: .+`)
+	entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 1000, errorRE, log.SelectEditMode(false /* redact */, false /* keepRedactable */))
 	require.NoError(t, err)
 	require.Len(t, entries, 9)
+
+	// Verify that the log entries have redaction markers applied by checking one
+	// of the specific error messages.
+	errorRE = regexp.MustCompile(`found invalid object with ID \d+: relation ‹"nojob"›`)
+	entries, err = log.FetchEntriesFromFiles(0, math.MaxInt64, 1000, errorRE, log.SelectEditMode(false /* redact */, true /* keepRedactable */))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
 }

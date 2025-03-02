@@ -35,7 +35,6 @@ go_test(
         "main_test.go",
         "pgbench_test.go",
     ],
-    args = ["-test.timeout=55s"],
     embed = [":bench"],
     deps = [
         "//pkg/base",
@@ -48,6 +47,7 @@ go_test(
         "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",
         "//pkg/sql/types",
+        "//pkg/testutils/pgurlutils",
         "//pkg/testutils/serverutils",
         "//pkg/testutils/skip",
         "//pkg/testutils/sqlutils",

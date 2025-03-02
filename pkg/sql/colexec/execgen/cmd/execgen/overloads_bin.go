@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -119,7 +114,7 @@ func registerBinOpOutputTypes() {
 	for _, binOp := range []treebin.BinaryOperatorSymbol{treebin.Bitand, treebin.Bitor, treebin.Bitxor} {
 		binOpOutputTypes[binOp] = make(map[typePair]*types.T)
 		populateBinOpIntOutputTypeOnIntArgs(binOp)
-		binOpOutputTypes[binOp][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.Any
+		binOpOutputTypes[binOp][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.AnyElement
 	}
 
 	// Simple arithmetic binary operators.
@@ -162,8 +157,8 @@ func registerBinOpOutputTypes() {
 		types.IntervalFamily, // types.Time + types.Interval
 	} {
 		for _, width := range supportedWidthsByCanonicalTypeFamily[compatibleFamily] {
-			binOpOutputTypes[treebin.Plus][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, compatibleFamily, width}] = types.Any
-			binOpOutputTypes[treebin.Plus][typePair{compatibleFamily, width, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.Any
+			binOpOutputTypes[treebin.Plus][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, compatibleFamily, width}] = types.AnyElement
+			binOpOutputTypes[treebin.Plus][typePair{compatibleFamily, width, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.AnyElement
 		}
 	}
 	for _, compatibleFamily := range []types.Family{
@@ -173,8 +168,8 @@ func registerBinOpOutputTypes() {
 		types.BytesFamily,                    // types.Jsonb - types.String
 	} {
 		for _, width := range supportedWidthsByCanonicalTypeFamily[compatibleFamily] {
-			binOpOutputTypes[treebin.Minus][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, compatibleFamily, width}] = types.Any
-			binOpOutputTypes[treebin.Minus][typePair{compatibleFamily, width, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.Any
+			binOpOutputTypes[treebin.Minus][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, compatibleFamily, width}] = types.AnyElement
+			binOpOutputTypes[treebin.Minus][typePair{compatibleFamily, width, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.AnyElement
 		}
 	}
 
@@ -193,14 +188,14 @@ func registerBinOpOutputTypes() {
 	// Other non-arithmetic binary operators.
 	binOpOutputTypes[treebin.Concat] = map[typePair]*types.T{
 		{types.BytesFamily, anyWidth, types.BytesFamily, anyWidth}:                                       types.Bytes,
-		{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}: types.Any,
+		{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}: types.AnyElement,
 	}
 
 	for _, binOp := range []treebin.BinaryOperatorSymbol{treebin.LShift, treebin.RShift} {
 		binOpOutputTypes[binOp] = make(map[typePair]*types.T)
 		populateBinOpIntOutputTypeOnIntArgs(binOp)
 		for _, intWidth := range supportedWidthsByCanonicalTypeFamily[types.IntFamily] {
-			binOpOutputTypes[binOp][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, types.IntFamily, intWidth}] = types.Any
+			binOpOutputTypes[binOp][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, types.IntFamily, intWidth}] = types.AnyElement
 		}
 	}
 

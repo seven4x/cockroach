@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package admission
 
@@ -112,7 +107,7 @@ func (h *ElasticCPUWorkHandle) OverLimit() (overLimit bool, difference time.Dura
 	// What we're effectively doing is just:
 	//
 	// 		runningTime := h.runningTime()
-	// 		return runningTime > h.allotted, runningTime - h.allotted
+	// 		return runningTime > h.allotted, preWork + runningTime - h.allotted
 	//
 	// But since this is invoked in tight loops where we're sensitive to
 	// per-iteration overhead (the naive form described above causes a 5%
@@ -127,6 +122,17 @@ func (h *ElasticCPUWorkHandle) OverLimit() (overLimit bool, difference time.Dura
 		return false, h.preWork + h.differenceWithAllottedAtLastCheck
 	}
 	return h.overLimitInner()
+}
+
+// RunningTime returns the pre-work duration and the work duration. This
+// should not be called in a tight loop (unlike OverLimit()). Expected usage
+// is to call this after OverLimit() has returned true, in order to get stats
+// about CPU usage.
+func (h *ElasticCPUWorkHandle) RunningTime() (preWork time.Duration, work time.Duration) {
+	if h == nil {
+		return 0, 0
+	}
+	return h.preWork, h.runningTime()
 }
 
 func (h *ElasticCPUWorkHandle) overLimitInner() (overLimit bool, difference time.Duration) {
