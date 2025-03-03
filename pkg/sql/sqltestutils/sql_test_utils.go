@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sqltestutils provides helper methods for testing sql packages.
 package sqltestutils
@@ -22,10 +17,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -38,8 +37,17 @@ import (
 // AddImmediateGCZoneConfig set the GC TTL to 0 for the given table ID. One must
 // make sure to disable strict GC TTL enforcement when using this.
 func AddImmediateGCZoneConfig(sqlDB *gosql.DB, id descpb.ID) (zonepb.ZoneConfig, error) {
+	return UpdateGCZoneConfig(sqlDB, id, 0)
+}
+
+// UpdateGCZoneConfig sets the GC TTL to a custom value for the given table ID.
+// If setting the value to 0, one must make sure to disable strict GC TTL
+// enforcement when using this.
+func UpdateGCZoneConfig(
+	sqlDB *gosql.DB, id descpb.ID, ttlSeconds int32,
+) (zonepb.ZoneConfig, error) {
 	cfg := zonepb.DefaultZoneConfig()
-	cfg.GC.TTLSeconds = 0
+	cfg.GC.TTLSeconds = ttlSeconds
 	buf, err := protoutil.Marshal(&cfg)
 	if err != nil {
 		return cfg, err
@@ -154,4 +162,15 @@ func PGXConn(t *testing.T, connURL url.URL) (*pgx.Conn, error) {
 		t.Fatal(err)
 	}
 	return pgx.ConnectConfig(context.Background(), pgxConfig)
+}
+
+// TestingDescsTxn is a convenience function for running a transaction on
+// descriptors when you have a serverutils.ApplicationLayerInterface.
+func TestingDescsTxn(
+	ctx context.Context,
+	s serverutils.ApplicationLayerInterface,
+	f func(ctx context.Context, txn isql.Txn, col *descs.Collection) error,
+) error {
+	execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
+	return sql.DescsTxn(ctx, &execCfg, f)
 }

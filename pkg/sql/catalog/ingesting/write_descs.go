@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ingesting
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/funcdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/nstree"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -56,7 +52,9 @@ func WriteDescriptors(
 	extra []roachpb.KeyValue,
 	inheritParentName string,
 	includePublicSchemaCreatePriv bool,
+	allowCrossDatabaseRefs bool,
 ) (err error) {
+	var writtenDescs nstree.MutableCatalog
 	ctx, span := tracing.ChildSpan(ctx, "WriteDescriptors")
 	defer span.Finish()
 	defer func() {
@@ -109,6 +107,7 @@ func WriteDescriptors(
 				return err
 			}
 		}
+		writtenDescs.UpsertDescriptor(desc)
 	}
 
 	// Write namespace and descriptor entries for each schema.
@@ -138,6 +137,7 @@ func WriteDescriptors(
 		if err := descsCol.InsertNamespaceEntryToBatch(ctx, kvTrace, sc, b); err != nil {
 			return err
 		}
+		writtenDescs.UpsertDescriptor(sc)
 	}
 
 	for i := range tables {
@@ -167,6 +167,7 @@ func WriteDescriptors(
 		if err := descsCol.InsertNamespaceEntryToBatch(ctx, kvTrace, table, b); err != nil {
 			return err
 		}
+		writtenDescs.UpsertDescriptor(table)
 	}
 
 	// Write all type descriptors -- create namespace entries and write to
@@ -194,6 +195,7 @@ func WriteDescriptors(
 		if err := descsCol.InsertNamespaceEntryToBatch(ctx, kvTrace, typ, b); err != nil {
 			return err
 		}
+		writtenDescs.UpsertDescriptor(typ)
 	}
 
 	for _, fn := range functions {
@@ -216,10 +218,19 @@ func WriteDescriptors(
 			return err
 		}
 		// Function does not have namespace entry.
+		writtenDescs.UpsertDescriptor(fn)
+	}
+
+	// allowCrossDatabaseRefs is only used by code paths that need the ability
+	// to write deprecated cross database references (i.e. RESTORE / IMPORT).
+	if !allowCrossDatabaseRefs {
+		if err := checkForCrossDatabaseReferences(ctx, writtenDescs.Catalog, descsCol, txn); err != nil {
+			return err
+		}
 	}
 
 	for _, kv := range extra {
-		b.InitPut(kv.Key, &kv.Value, false)
+		b.CPut(kv.Key, &kv.Value, nil /* expValue */)
 	}
 	if err := txn.Run(ctx, b); err != nil {
 		if errors.HasType(err, (*kvpb.ConditionFailedError)(nil)) {
@@ -233,7 +244,7 @@ func WriteDescriptors(
 func processTableForMultiRegion(
 	ctx context.Context, txn *kv.Txn, descsCol *descs.Collection, table catalog.TableDescriptor,
 ) error {
-	dbDesc, err := descsCol.ByID(txn).WithoutDropped().Get().Database(ctx, table.GetParentID())
+	dbDesc, err := descsCol.ByIDWithoutLeased(txn).WithoutDropped().Get().Database(ctx, table.GetParentID())
 	if err != nil {
 		return err
 	}
@@ -257,4 +268,42 @@ func processTableForMultiRegion(
 		}
 	}
 	return nil
+}
+
+// checkForCrossDatabaseReferences checks if any descriptors written have
+// cross database references. Once cross database references are fully removed this can be
+// a part of descriptor validation.
+func checkForCrossDatabaseReferences(
+	ctx context.Context, descsToCheck nstree.Catalog, descsCol *descs.Collection, txn *kv.Txn,
+) error {
+	return descsToCheck.ForEachDescriptor(func(desc catalog.Descriptor) error {
+		referencedDescs, err := desc.GetReferencedDescIDs(catalog.ValidationLevelAllPreTxnCommit)
+		if err != nil {
+			return err
+		}
+		// Fetch the parent ID of the descriptor. If the object
+		// is already the database its self-referential.
+		parentID := desc.GetParentID()
+		if desc.DescriptorType() == catalog.Database {
+			parentID = desc.GetID()
+		}
+		for _, refID := range referencedDescs.Ordered() {
+			refDesc, err := descsCol.ByIDWithoutLeased(txn).Get().Desc(ctx, refID)
+			if err != nil {
+				return err
+			}
+			otherParentID := refDesc.GetParentID()
+			if refDesc.DescriptorType() == catalog.Database {
+				otherParentID = refDesc.GetID()
+			}
+			if otherParentID != parentID {
+				return pgerror.Newf(
+					pgcode.FeatureNotSupported,
+					"cross database %s references are not supported: %s",
+					refDesc.GetObjectType(),
+					refDesc.GetName())
+			}
+		}
+		return nil
+	})
 }

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package enginepb
 
@@ -65,9 +60,86 @@ func TxnSeqIsIgnored(seq TxnSeq, ignored []IgnoredSeqNumRange) bool {
 		ignored[i].Start <= seq
 }
 
+// TxnSeqListExtends returns true if every interval in b is fully covered by an
+// interval in a.
+//
+// It assumes that the input intervals are non-overlapping, non-contiguous, and
+// sorted. It returns false if the two lists are disjoint.
+func TxnSeqListExtends(a, b []IgnoredSeqNumRange) bool {
+	idxA, idxB := 0, 0
+	for idxB < len(b) {
+		// No more intervals in a but we stil have intervals in b, b must not be
+		// fully covered.
+		if idxA >= len(a) {
+			return false
+		}
+
+		// If the current a start is greater than b start, then b extends to the left
+		// of a and therefore b must not be fully covered.
+		if a[idxA].Start > b[idxB].Start {
+			return false
+		}
+
+		// From above we know b's start is equal to or after the start of a. If a
+		// end is less than b end, then the current a is completely consumed and we
+		// need to move to the next a interval. Otherwise, the b interval is
+		// completely covered and we need to move to the next b interval.
+		if a[idxA].End < b[idxB].End {
+			idxA++
+		} else {
+			idxB++
+		}
+	}
+	return true
+}
+
+// TxnSeqListAppend returns a new slice with the given range added to the
+// given list of ignored seqnum ranges.
+//
+// The following invariants are assumed to hold and are preserved:
+// - the list contains no overlapping ranges
+// - the list contains no contiguous ranges
+// - the list is sorted, with larger seqnums at the end
+//
+// Additionally, the caller must ensure:
+//
+//  1. if the new range overlaps with some range in the list, then it
+//     also overlaps with every subsequent range in the list.
+//
+//  2. the new range's "end" seqnum is larger or equal to the "end"
+//     seqnum of the last element in the list.
+//
+// For example:
+//
+//	current list [3 5] [10 20] [22 24]
+//	new item:    [8 26]
+//	final list:  [3 5] [8 26]
+//
+//	current list [3 5] [10 20] [22 24]
+//	new item:    [28 32]
+//	final list:  [3 5] [10 20] [22 24] [28 32]
+//
+// This corresponds to savepoints semantics:
+//
+//   - Property 1 says that a rollback to an earlier savepoint
+//     rolls back over all writes following that savepoint.
+//   - Property 2 comes from that the new range's 'end' seqnum is the
+//     current write seqnum and thus larger than or equal to every
+//     previously seen value.
+func TxnSeqListAppend(list []IgnoredSeqNumRange, newRange IgnoredSeqNumRange) []IgnoredSeqNumRange {
+	i := sort.Search(len(list), func(i int) bool {
+		return list[i].End >= newRange.Start
+	})
+
+	cpy := make([]IgnoredSeqNumRange, i+1)
+	copy(cpy[:i], list[:i])
+	cpy[i] = newRange
+	return cpy
+}
+
 // Short returns a prefix of the transaction's ID.
 func (t TxnMeta) Short() redact.SafeString {
-	return redact.SafeString(t.ID.Short())
+	return redact.SafeString(t.ID.Short().String())
 }
 
 // Total returns the range size as the sum of the key and value
@@ -92,16 +164,16 @@ func (ms MVCCStats) HasNoUserData() bool {
 	return ms.ContainsEstimates == 0 && ms.RangeKeyCount == 0 && ms.KeyCount == 0 && ms.IntentCount == 0
 }
 
-// AvgIntentAge returns the average age of outstanding intents,
+// AvgLockAge returns the average age of outstanding locks,
 // based on current wall time specified via nowNanos.
-func (ms MVCCStats) AvgIntentAge(nowNanos int64) float64 {
-	if ms.IntentCount == 0 {
+func (ms MVCCStats) AvgLockAge(nowNanos int64) float64 {
+	if ms.LockCount == 0 {
 		return 0
 	}
 	// Advance age by any elapsed time since last computed. Note that
 	// we operate on a copy.
 	ms.AgeTo(nowNanos)
-	return float64(ms.IntentAge) / float64(ms.IntentCount)
+	return float64(ms.LockAge) / float64(ms.LockCount)
 }
 
 // GCByteAge returns the total age of outstanding gc'able
@@ -134,7 +206,7 @@ func (ms *MVCCStats) AgeTo(nowNanos int64) {
 	diffSeconds := nowNanos/1e9 - ms.LastUpdateNanos/1e9
 
 	ms.GCBytesAge += ms.GCBytes() * diffSeconds
-	ms.IntentAge += ms.IntentCount * diffSeconds
+	ms.LockAge += ms.LockCount * diffSeconds
 	ms.LastUpdateNanos = nowNanos
 }
 
@@ -149,7 +221,7 @@ func (ms *MVCCStats) Add(oms MVCCStats) {
 	ms.ContainsEstimates += oms.ContainsEstimates
 
 	// Now that we've done that, we may just add them.
-	ms.IntentAge += oms.IntentAge
+	ms.LockAge += oms.LockAge
 	ms.GCBytesAge += oms.GCBytesAge
 	ms.LiveBytes += oms.LiveBytes
 	ms.KeyBytes += oms.KeyBytes
@@ -159,7 +231,8 @@ func (ms *MVCCStats) Add(oms MVCCStats) {
 	ms.KeyCount += oms.KeyCount
 	ms.ValCount += oms.ValCount
 	ms.IntentCount += oms.IntentCount
-	ms.SeparatedIntentCount += oms.SeparatedIntentCount
+	ms.LockBytes += oms.LockBytes
+	ms.LockCount += oms.LockCount
 	ms.RangeKeyCount += oms.RangeKeyCount
 	ms.RangeKeyBytes += oms.RangeKeyBytes
 	ms.RangeValCount += oms.RangeValCount
@@ -180,7 +253,7 @@ func (ms *MVCCStats) Subtract(oms MVCCStats) {
 	ms.ContainsEstimates -= oms.ContainsEstimates
 
 	// Now that we've done that, we may subtract.
-	ms.IntentAge -= oms.IntentAge
+	ms.LockAge -= oms.LockAge
 	ms.GCBytesAge -= oms.GCBytesAge
 	ms.LiveBytes -= oms.LiveBytes
 	ms.KeyBytes -= oms.KeyBytes
@@ -190,7 +263,8 @@ func (ms *MVCCStats) Subtract(oms MVCCStats) {
 	ms.KeyCount -= oms.KeyCount
 	ms.ValCount -= oms.ValCount
 	ms.IntentCount -= oms.IntentCount
-	ms.SeparatedIntentCount -= oms.SeparatedIntentCount
+	ms.LockBytes -= oms.LockBytes
+	ms.LockCount -= oms.LockCount
 	ms.RangeKeyCount -= oms.RangeKeyCount
 	ms.RangeKeyBytes -= oms.RangeKeyBytes
 	ms.RangeValCount -= oms.RangeValCount
@@ -200,15 +274,67 @@ func (ms *MVCCStats) Subtract(oms MVCCStats) {
 	ms.AbortSpanBytes -= oms.AbortSpanBytes
 }
 
+// Scale scales all statistics by the given factor.
+func (ms *MVCCStats) Scale(factor float32) {
+	ms.LockAge = int64(float32(ms.LockAge) * factor)
+	ms.GCBytesAge = int64(float32(ms.GCBytesAge) * factor)
+	ms.LiveBytes = int64(float32(ms.LiveBytes) * factor)
+	ms.KeyBytes = int64(float32(ms.KeyBytes) * factor)
+	ms.ValBytes = int64(float32(ms.ValBytes) * factor)
+	ms.IntentBytes = int64(float32(ms.IntentBytes) * factor)
+	ms.LiveCount = int64(float32(ms.LiveCount) * factor)
+	ms.KeyCount = int64(float32(ms.KeyCount) * factor)
+	ms.ValCount = int64(float32(ms.ValCount) * factor)
+	ms.IntentCount = int64(float32(ms.IntentCount) * factor)
+	ms.LockBytes = int64(float32(ms.LockBytes) * factor)
+	ms.LockCount = int64(float32(ms.LockCount) * factor)
+	ms.RangeKeyCount = int64(float32(ms.RangeKeyCount) * factor)
+	ms.RangeKeyBytes = int64(float32(ms.RangeKeyBytes) * factor)
+	ms.RangeValCount = int64(float32(ms.RangeValCount) * factor)
+	ms.RangeValBytes = int64(float32(ms.RangeValBytes) * factor)
+	ms.SysBytes = int64(float32(ms.SysBytes) * factor)
+	ms.SysCount = int64(float32(ms.SysCount) * factor)
+	ms.AbortSpanBytes = int64(float32(ms.AbortSpanBytes) * factor)
+}
+
+// HasUserDataCloseTo compares the fields corresponding to user data and returns
+// whether their absolute difference is within a certain limit. Separate limits
+// are passed in for stats measures in count and bytes.
+func (ms *MVCCStats) HasUserDataCloseTo(
+	oms MVCCStats, maxCountDiff int64, maxBytesDiff int64,
+) bool {
+	abs := func(x int64) int64 {
+		if x < 0 {
+			return -x
+		}
+		return x
+	}
+	countWithinLimit := func(v1 int64, v2 int64) bool {
+		return abs(v1-v2) <= maxCountDiff
+	}
+	bytesWithinLimit := func(v1 int64, v2 int64) bool {
+		return abs(v1-v2) <= maxBytesDiff
+	}
+
+	return countWithinLimit(ms.KeyCount, oms.KeyCount) &&
+		bytesWithinLimit(ms.KeyBytes, oms.KeyBytes) &&
+		countWithinLimit(ms.ValCount, oms.ValCount) &&
+		bytesWithinLimit(ms.ValBytes, oms.ValBytes) &&
+		countWithinLimit(ms.LiveCount, oms.LiveCount) &&
+		bytesWithinLimit(ms.LiveBytes, oms.LiveBytes) &&
+		countWithinLimit(ms.IntentCount, oms.IntentCount) &&
+		bytesWithinLimit(ms.IntentBytes, oms.IntentBytes) &&
+		countWithinLimit(ms.LockCount, oms.LockCount) &&
+		bytesWithinLimit(ms.LockBytes, oms.LockBytes) &&
+		countWithinLimit(ms.RangeKeyCount, oms.RangeKeyCount) &&
+		bytesWithinLimit(ms.RangeKeyBytes, oms.RangeKeyBytes) &&
+		countWithinLimit(ms.RangeValCount, oms.RangeValCount) &&
+		bytesWithinLimit(ms.RangeValBytes, oms.RangeValBytes)
+}
+
 // IsInline returns true if the value is inlined in the metadata.
 func (meta MVCCMetadata) IsInline() bool {
 	return meta.RawBytes != nil
-}
-
-// AddToIntentHistory adds the sequence and value to the intent history.
-func (meta *MVCCMetadata) AddToIntentHistory(seq TxnSeq, val []byte) {
-	meta.IntentHistory = append(meta.IntentHistory,
-		MVCCMetadata_SequencedIntent{Sequence: seq, Value: val})
 }
 
 // GetPrevIntentSeq goes through the intent history and finds the previous

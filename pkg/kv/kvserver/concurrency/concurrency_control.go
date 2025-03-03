@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package concurrency provides a concurrency manager structure that
 // encapsulates the details of concurrency control and contention handling for
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/redact"
 )
 
 // Manager is a structure that sequences incoming requests and provides
@@ -205,7 +201,7 @@ type RequestSequencer interface {
 	// the request had against conflicting requests and allowing conflicting
 	// requests that are blocked on this one to proceed. The guard should not
 	// be used after being released.
-	FinishReq(*Guard)
+	FinishReq(context.Context, *Guard)
 }
 
 // ContentionHandler is concerned with handling contention-related errors. This
@@ -289,14 +285,27 @@ type RangeStateListener interface {
 	// updated.
 	OnRangeDescUpdated(*roachpb.RangeDescriptor)
 
+	// OnRangeLeaseTransferEval informs the concurrency manager that the range is
+	// evaluating a lease transfer. It is called during evalutation of a lease
+	// transfer. The returned LockAcquisition structs represent held locks that we
+	// may want to flush to disk as replicated. Since lease transfers declare
+	// latches that conflict with all requests, the caller knows that nothing is
+	// going to modify the lock table as its evaluating.
+	OnRangeLeaseTransferEval() []*roachpb.LockAcquisition
+
 	// OnRangeLeaseUpdated informs the concurrency manager that its range's
 	// lease has been updated. The argument indicates whether this manager's
 	// replica is the leaseholder going forward.
 	OnRangeLeaseUpdated(_ roachpb.LeaseSequence, isLeaseholder bool)
 
-	// OnRangeSplit informs the concurrency manager that its range has split off
-	// a new range to its RHS.
-	OnRangeSplit()
+	// OnRangeSplit informs the concurrency manager that its range
+	// has split off a new range to its RHS. The provided key
+	// should be the new RHS StartKey (LHS EndKey). Note that this
+	// is inclusives so all locks on keys greater or equal to this
+	// key will be cleared. The returned LockAcquistion structs
+	// represent locks that we may want to acquire on the RHS
+	// replica before it is serving requests.
+	OnRangeSplit(roachpb.Key) []roachpb.LockAcquisition
 
 	// OnRangeMerge informs the concurrency manager that its range has merged
 	// into its LHS neighbor. This is not called on the LHS range being merged
@@ -402,8 +411,12 @@ type Request struct {
 	// level of quality-of-service under severe per-key contention. If set
 	// to a non-zero value and an existing lock wait-queue is already equal
 	// to or exceeding this length, the request will be rejected eagerly
-	// with a LockConflictError instead of entering the queue and waiting.
+	// with a WriteIntentError instead of entering the queue and waiting.
 	MaxLockWaitQueueLength int
+
+	// AdmissionHeader is the header in the request's BatchRequest. It is plumbed
+	// through for intent resolution admission control.
+	AdmissionHeader kvpb.AdmissionHeader
 
 	// The poison.Policy to use for this Request.
 	PoisonPolicy poison.Policy
@@ -428,6 +441,14 @@ type Request struct {
 	// passed to SequenceReq. Only supplied to SequenceReq if the method is
 	// not also passed an exiting Guard.
 	LockSpans *lockspanset.LockSpanSet
+
+	// The SafeFormatter capable of formatting the request. This is used to enrich
+	// logging with request level information when latches conflict.
+	BaFmt redact.SafeFormatter
+
+	// DeadlockTimeout is the amount of time that the request will wait on a lock
+	// before pushing the lock holder's transaction for deadlock detection.
+	DeadlockTimeout time.Duration
 }
 
 // Guard is returned from Manager.SequenceReq. The guard is passed back in to
@@ -506,13 +527,13 @@ type latchManager interface {
 	// WaitFor waits for conflicting latches on the specified spans without adding
 	// any latches itself. Fast path for operations that only require flushing out
 	// old operations without blocking any new ones.
-	WaitFor(ctx context.Context, spans *spanset.SpanSet, pp poison.Policy) *Error
+	WaitFor(ctx context.Context, spans *spanset.SpanSet, pp poison.Policy, baFmt redact.SafeFormatter) *Error
 
 	// Poison a guard's latches, allowing waiters to fail fast.
 	Poison(latchGuard)
 
 	// Release a guard's latches, relinquish its protection from conflicting requests.
-	Release(latchGuard)
+	Release(ctx context.Context, lg latchGuard)
 
 	// Metrics returns information about the state of the latchManager.
 	Metrics() LatchMetrics
@@ -588,7 +609,7 @@ type lockTable interface {
 	// lockTableGuard and the subsequent calls reuse the previously returned
 	// one. The latches needed by the request must be held when calling this
 	// function.
-	ScanAndEnqueue(Request, lockTableGuard) lockTableGuard
+	ScanAndEnqueue(Request, lockTableGuard) (lockTableGuard, *Error)
 
 	// ScanOptimistic takes a snapshot of the lock table for later checking for
 	// conflicts, and returns a guard. It is for optimistic evaluation of
@@ -733,11 +754,23 @@ type lockTable interface {
 	// QueryLockTableState returns detailed metadata on locks managed by the lockTable.
 	QueryLockTableState(span roachpb.Span, opts QueryLockTableOptions) ([]roachpb.LockStateInfo, QueryLockTableResumeState)
 
+	// ExportUnreplicatedLocks runs exporter on each held, unreplicated lock
+	// in the given span.
+	//
+	// Note that the caller is responsible for acquiring latches across the span
+	// it is exporting if it needs to be sure that the exported locks won't be
+	// updated in the lock table while it is still referencing them.
+	ExportUnreplicatedLocks(span roachpb.Span, exporter func(*roachpb.LockAcquisition))
+
 	// Metrics returns information about the state of the lockTable.
 	Metrics() LockTableMetrics
 
 	// String returns a debug string representing the state of the lockTable.
 	String() string
+
+	// TestingSetMaxLocks updates the locktable's lock limit. This can be used to
+	// force the locktable to exceed its limit and clear locks.
+	TestingSetMaxLocks(maxLocks int64)
 }
 
 // lockTableGuard is a handle to a request as it waits on conflicting locks in a
@@ -756,7 +789,7 @@ type lockTableGuard interface {
 	NewStateChan() chan struct{}
 
 	// CurState returns the latest waiting state.
-	CurState() waitingState
+	CurState() (waitingState, error)
 
 	// ResolveBeforeScanning lists the locks to resolve before scanning again.
 	// This must be called after:
@@ -788,7 +821,7 @@ type lockTableGuard interface {
 	// for conflicts. This helps prevent a stream of locking SKIP LOCKED requests
 	// from starving out regular locking requests. In such cases, true is
 	// returned, but so is nil.
-	IsKeyLockedByConflictingTxn(roachpb.Key, lock.Strength) (bool, *enginepb.TxnMeta, error)
+	IsKeyLockedByConflictingTxn(context.Context, roachpb.Key, lock.Strength) (bool, *enginepb.TxnMeta, error)
 }
 
 // lockTableWaiter is concerned with waiting in lock wait-queues for locks held
@@ -835,7 +868,7 @@ type lockTableWaiter interface {
 	// ResolveDeferredIntents resolves the batch of intents if the provided
 	// error is nil. The batch of intents may be resolved more efficiently than
 	// if they were resolved individually.
-	ResolveDeferredIntents(context.Context, []roachpb.LockUpdate) *Error
+	ResolveDeferredIntents(context.Context, kvpb.AdmissionHeader, []roachpb.LockUpdate) *Error
 }
 
 // txnWaitQueue holds a collection of wait-queues for transaction records.
@@ -993,7 +1026,7 @@ type txnWaitQueue interface {
 	//
 	// If the transaction is successfully pushed while this method is waiting,
 	// the first return value is a non-nil PushTxnResponse object.
-	MaybeWaitForPush(context.Context, *kvpb.PushTxnRequest) (*kvpb.PushTxnResponse, *Error)
+	MaybeWaitForPush(context.Context, *kvpb.PushTxnRequest, lock.WaitPolicy) (*kvpb.PushTxnResponse, *Error)
 
 	// MaybeWaitForQuery checks whether there is a queue already established for
 	// transaction being queried. If not, or if the QueryTxn request hasn't
@@ -1017,4 +1050,8 @@ type requestQueuer interface {
 	// Clear empties the queue(s) and causes all waiting requests to
 	// return. If disable is true, future requests must not be enqueued.
 	Clear(disable bool)
+
+	// ClearGE empties the queue(s) for any keys greater or equal
+	// to than the given key.
+	ClearGE(roachpb.Key) []roachpb.LockAcquisition
 }

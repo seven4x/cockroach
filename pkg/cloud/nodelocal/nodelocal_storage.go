@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package nodelocal
 
@@ -151,6 +146,12 @@ func joinRelativePath(filePath string, file string) string {
 	return path.Join(".", filePath, file)
 }
 
+// isNotFoundErr checks if the error indicates a file not found condition,
+// handling both local and remote nodelocal store cases.
+func isNotFoundErr(err error) bool {
+	return oserror.IsNotExist(err) || status.Code(err) == codes.NotFound
+}
+
 func (l *localFileStorage) Writer(ctx context.Context, basename string) (io.WriteCloser, error) {
 	return l.blobClient.Writer(ctx, joinRelativePath(l.base, basename))
 }
@@ -159,19 +160,10 @@ func (l *localFileStorage) ReadFile(
 	ctx context.Context, basename string, opts cloud.ReadOptions,
 ) (ioctx.ReadCloserCtx, int64, error) {
 	reader, size, err := l.blobClient.ReadFile(ctx, joinRelativePath(l.base, basename), opts.Offset)
+	if err != nil && isNotFoundErr(err) {
+		return nil, 0, cloud.WrapErrFileDoesNotExist(err, "nodelocal storage file does not exist")
+	}
 	if err != nil {
-		// The format of the error returned by the above ReadFile call differs based
-		// on whether we are reading from a local or remote nodelocal store.
-		// The local store returns a golang native ErrNotFound, whereas the remote
-		// store returns a gRPC native NotFound error.
-		if oserror.IsNotExist(err) || status.Code(err) == codes.NotFound {
-			// nolint:errwrap
-			return nil, 0, errors.WithMessagef(
-				errors.Wrap(cloud.ErrFileDoesNotExist, "nodelocal storage file does not exist"),
-				"%s",
-				err.Error(),
-			)
-		}
 		return nil, 0, err
 	}
 	return reader, size, nil
@@ -209,7 +201,11 @@ func (l *localFileStorage) List(
 }
 
 func (l *localFileStorage) Delete(ctx context.Context, basename string) error {
-	return l.blobClient.Delete(ctx, joinRelativePath(l.base, basename))
+	err := l.blobClient.Delete(ctx, joinRelativePath(l.base, basename))
+	if isNotFoundErr(err) {
+		return nil
+	}
+	return err
 }
 
 func (l *localFileStorage) Size(ctx context.Context, basename string) (int64, error) {
@@ -226,5 +222,10 @@ func (*localFileStorage) Close() error {
 
 func init() {
 	cloud.RegisterExternalStorageProvider(cloudpb.ExternalStorageProvider_nodelocal,
-		parseLocalFileURI, makeLocalFileStorage, cloud.RedactedParams(), scheme)
+		cloud.RegisteredProvider{
+			ConstructFn:    makeLocalFileStorage,
+			ParseFn:        parseLocalFileURI,
+			RedactedParams: cloud.RedactedParams(),
+			Schemes:        []string{scheme},
+		})
 }

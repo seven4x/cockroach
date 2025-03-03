@@ -1,22 +1,15 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package statements
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/plpgsqltree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/jsonpath"
 )
-
-type AST interface {
-}
 
 // Statement is the result of parsing a single statement. It contains the AST
 // node along with other information.
@@ -68,6 +61,8 @@ type Statements []Statement[tree.Statement]
 
 type PLpgStatement Statement[*plpgsqltree.Block]
 
+type JsonpathStatement Statement[*jsonpath.Jsonpath]
+
 // String returns the AST formatted as a string.
 func (stmts Statements) String() string {
 	return stmts.StringWithFlags(tree.FmtSimple)
@@ -95,3 +90,23 @@ func (stmt PLpgStatement) StringWithFlags(flags tree.FmtFlags) string {
 	stmt.AST.Format(ctx)
 	return ctx.CloseAndGetString()
 }
+
+func (stmt JsonpathStatement) String() string {
+	return stmt.StringWithFlags(tree.FmtSimple)
+}
+
+// StringWithFlags returns the AST formatted as a string (with the given flags).
+func (stmt JsonpathStatement) StringWithFlags(flags tree.FmtFlags) string {
+	ctx := tree.NewFmtCtx(flags)
+	stmt.AST.Format(ctx)
+	return ctx.CloseAndGetString()
+}
+
+type ParsedStmts interface {
+	String() string
+	StringWithFlags(flags tree.FmtFlags) string
+}
+
+var _ ParsedStmts = Statements{}
+var _ ParsedStmts = PLpgStatement{}
+var _ ParsedStmts = JsonpathStatement{}

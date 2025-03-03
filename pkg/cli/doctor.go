@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -42,8 +37,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgconn"
-	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/spf13/cobra"
 )
 
@@ -51,8 +46,8 @@ var debugDoctorCmd = &cobra.Command{
 	Use:   "doctor [command]",
 	Short: "run a cockroach doctor tool command",
 	Long: `
-Run the doctor tool to recreate or examine cockroach system table contents. 
-System tables are queried either from a live cluster or from an unzipped 
+Run the doctor tool to recreate or examine cockroach system table contents.
+System tables are queried either from a live cluster or from an unzipped
 debug.zip.
 `,
 }
@@ -62,7 +57,7 @@ var doctorExamineCmd = &cobra.Command{
 	Short: "examine system tables for inconsistencies",
 	Long: `
 Run the doctor tool to examine the system table contents and perform validation
-checks. System tables are queried either from a live cluster or from an unzipped 
+checks. System tables are queried either from a live cluster or from an unzipped
 debug.zip.
 `,
 }
@@ -122,7 +117,7 @@ Run the doctor tool system data from a live cluster specified by --url.
 		Args: cobra.NoArgs,
 		RunE: clierrorplus.MaybeDecorateError(
 			func(cmd *cobra.Command, args []string) (resErr error) {
-				sqlConn, err := makeSQLClient("cockroach doctor", useSystemDb)
+				sqlConn, err := makeSQLClient(context.Background(), "cockroach doctor", useSystemDb)
 				if err != nil {
 					return errors.Wrap(err, "could not establish connection to cluster")
 				}
@@ -256,7 +251,7 @@ FROM system.descriptor ORDER BY id`
 		if vals[2] == nil {
 			row.ModTime = hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
 		} else if mt, ok := vals[2].(pgtype.Numeric); ok {
-			buf, err := mt.EncodeText(nil, nil)
+			buf, err := mt.MarshalJSON()
 			if err != nil {
 				return err
 			}
@@ -344,7 +339,7 @@ SELECT id, status, payload, progress FROM system.jobs
 	if err := selectRowsMap(sqlConn, stmt, make([]driver.Value, 4), func(vals []driver.Value) error {
 		md := jobs.JobMetadata{}
 		md.ID = jobspb.JobID(vals[0].(int64))
-		md.Status = jobs.Status(vals[1].(string))
+		md.State = jobs.State(vals[1].(string))
 		md.Payload = &jobspb.Payload{}
 		if err := protoutil.Unmarshal(vals[2].([]byte), md.Payload); err != nil {
 			return err
@@ -387,9 +382,9 @@ func fromZipDir(
 				return errors.Wrapf(err, "failed to parse descriptor id %s", fields[0])
 			}
 
-			descBytes, err := hx.DecodeString(fields[last])
-			if err != nil {
-				return errors.Wrapf(err, "failed to decode hex descriptor %d", i)
+			descBytes, ok := interpretString(fields[last])
+			if !ok {
+				return errors.Newf("failed to decode hex descriptor %d", i)
 			}
 			ts := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
 			descTable = append(descTable, doctor.DescriptorTableRow{ID: int64(i), DescBytes: descBytes, ModTime: ts})
@@ -507,11 +502,11 @@ func fromZipDir(
 	}
 
 	jobsTable = make(doctor.JobsTable, 0)
-	if checkIfFileExists(zipDirPath, "system.jobs.txt") {
-		if err := slurp(zipDirPath, "system.jobs.txt", func(row string) error {
+	if checkIfFileExists(zipDirPath, "crdb_internal.system_jobs.txt") {
+		if err := slurp(zipDirPath, "crdb_internal.system_jobs.txt", func(row string) error {
 			fields := strings.Fields(row)
 			md := jobs.JobMetadata{}
-			md.Status = jobs.Status(fields[1])
+			md.State = jobs.State(fields[1])
 
 			id, err := strconv.Atoi(fields[0])
 			if err != nil {
@@ -519,23 +514,23 @@ func fromZipDir(
 			}
 			md.ID = jobspb.JobID(id)
 
-			last := len(fields) - 1
-			payloadBytes, err := hx.DecodeString(fields[last-1])
-			if err != nil {
-				// TODO(postamar): remove this check once payload redaction is improved
-				if fields[last-1] == "NULL" {
-					return nil
-				}
-				return errors.Wrapf(err, "job %d: failed to decode hex payload", id)
+			// N.B. The "created" column takes 2 positions in our fields array.
+			payloadBytes, ok := interpretString(fields[4])
+			if !ok {
+				return errors.Newf("job %d: failed to decode hex payload", id)
 			}
 			md.Payload = &jobspb.Payload{}
 			if err := protoutil.Unmarshal(payloadBytes, md.Payload); err != nil {
 				return errors.Wrap(err, "failed unmarshalling job payload")
 			}
 
-			progressBytes, err := hx.DecodeString(fields[last])
-			if err != nil {
-				return errors.Wrapf(err, "job %d: failed to decode hex progress", id)
+			// Skip NULL job payloads.
+			if fields[5] == "NULL" {
+				return nil
+			}
+			progressBytes, ok := interpretString(fields[5])
+			if !ok {
+				return errors.Newf("job %d: failed to decode hex progress", id)
 			}
 			md.Progress = &jobspb.Progress{}
 			if err := protoutil.Unmarshal(progressBytes, md.Progress); err != nil {
@@ -554,12 +549,12 @@ func fromZipDir(
 			Payload  string `json:"hex_payload"`
 			Progress string `json:"hex_progress"`
 		}, 0)
-		if err := parseJSONFile(zipDirPath, "system.jobs.json", &jobsTableJSON); err != nil {
-			return nil, nil, nil, errors.Wrapf(err, "failed to parse system.descriptor.json")
+		if err := parseJSONFile(zipDirPath, "crdb_internal.system_jobs.json", &jobsTableJSON); err != nil {
+			return nil, nil, nil, errors.Wrapf(err, "failed to parse crdb_internal.system_jobs.json")
 		}
 		for _, job := range jobsTableJSON {
 			row := jobs.JobMetadata{
-				Status: jobs.Status(job.Status),
+				State: jobs.State(job.Status),
 			}
 			id, err := strconv.ParseInt(job.ID, 10, 64)
 			if len(job.ID) > 0 && err != nil {

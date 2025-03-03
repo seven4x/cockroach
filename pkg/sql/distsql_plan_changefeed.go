@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -85,7 +81,9 @@ func PlanCDCExpression(
 	p.stmt = makeStatement(statements.Statement[tree.Statement]{
 		AST: cdcExpr,
 		SQL: tree.AsString(cdcExpr),
-	}, clusterunique.ID{} /* queryID */)
+	}, clusterunique.ID{}, /* queryID */
+		tree.FmtFlags(queryFormattingForFingerprintsMask.Get(&p.execCfg.Settings.SV)),
+	)
 
 	p.curPlan.init(&p.stmt, &p.instrumentation)
 	opc := &p.optPlanningCtx
@@ -115,12 +113,14 @@ func PlanCDCExpression(
 		return cdcPlan, err
 	}
 	if log.V(2) {
-		log.Infof(ctx, "Optimized CDC expression: %s", memo.RootExpr().String())
+		log.Infof(ctx, "Optimized CDC expression: %s", memo)
 	}
 
 	const allowAutoCommit = false
+	const disableTelemetryAndPlanGists = false
 	if err := opc.runExecBuilder(
-		ctx, &p.curPlan, &p.stmt, newExecFactory(ctx, p), memo, p.EvalContext(), allowAutoCommit,
+		ctx, &p.curPlan, &p.stmt, newExecFactory(ctx, p), memo, p.SemaCtx(),
+		p.EvalContext(), allowAutoCommit, disableTelemetryAndPlanGists,
 	); err != nil {
 		return cdcPlan, err
 	}
@@ -168,11 +168,12 @@ func PlanCDCExpression(
 		return cdcPlan, errors.AssertionFailedf("unable to determine result columns")
 	}
 
-	if len(p.curPlan.subqueryPlans) > 0 || len(p.curPlan.cascades) > 0 || len(p.curPlan.checkPlans) > 0 {
+	if len(p.curPlan.subqueryPlans) > 0 || len(p.curPlan.cascades) > 0 ||
+		len(p.curPlan.checkPlans) > 0 || len(p.curPlan.triggers) > 0 {
 		return cdcPlan, errors.AssertionFailedf("unexpected query structure")
 	}
 
-	planCtx := p.DistSQLPlanner().NewPlanningCtx(ctx, &p.extendedEvalCtx, p, p.txn, DistributionTypeNone)
+	planCtx := p.DistSQLPlanner().NewPlanningCtx(ctx, &p.extendedEvalCtx, p, p.txn, LocalDistribution)
 
 	return CDCExpressionPlan{
 		Plan:         p.curPlan.main,
@@ -267,6 +268,7 @@ func (p CDCExpressionPlan) CollectPlanColumns(collector func(column colinfo.Resu
 // datums must match the number of inputs (and types) expected by this flow
 // (verified below).
 type cdcValuesNode struct {
+	zeroInputPlanNode
 	source        execinfra.RowSource
 	datumRow      []tree.Datum
 	colOrd        []int
@@ -379,7 +381,19 @@ func (c *cdcOptCatalog) ResolveDataSource(
 		return nil, cat.DataSourceName{}, err
 	}
 
-	ds, err := c.newCDCDataSource(desc, c.targetFamilyID)
+	// We block tables with row-level security enabled because they can inject
+	// filters into the select op. This conflicts with the CDC expression's
+	// expectation that the SELECT contains no filters — that all filters are
+	// converted into a projection for the __crdb_filter column (see
+	// predicateAsProjection). Since the RLS filters aren’t included in
+	// __crdb_filter, we block this functionality until that work is complete.
+	if desc.IsRowLevelSecurityEnabled() {
+		return nil, cat.DataSourceName{}, unimplemented.NewWithIssuef(
+			142171,
+			"CDC queries are not supported on tables with row-level security enabled")
+	}
+
+	ds, err := c.newCDCDataSource(ctx, desc, c.targetFamilyID)
 	if err != nil {
 		return nil, cat.DataSourceName{}, err
 	}
@@ -397,7 +411,7 @@ func (c *cdcOptCatalog) ResolveDataSourceByID(
 		return nil, false, err
 	}
 
-	ds, err := c.newCDCDataSource(desc, c.targetFamilyID)
+	ds, err := c.newCDCDataSource(ctx, desc, c.targetFamilyID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -407,7 +421,7 @@ func (c *cdcOptCatalog) ResolveDataSourceByID(
 // ResolveFunction implements cat.Catalog interface.
 // We provide custom implementation to resolve CDC specific functions.
 func (c *cdcOptCatalog) ResolveFunction(
-	ctx context.Context, fnName *tree.UnresolvedName, path tree.SearchPath,
+	ctx context.Context, fnName tree.UnresolvedRoutineName, path tree.SearchPath,
 ) (*tree.ResolvedFunctionDefinition, error) {
 	if c.semaCtx != nil && c.semaCtx.FunctionResolver != nil {
 		fnDef, err := c.semaCtx.FunctionResolver.ResolveFunction(ctx, fnName, path)
@@ -421,13 +435,13 @@ func (c *cdcOptCatalog) ResolveFunction(
 
 // newCDCDataSource builds an optTable for the target cdc table and family.
 func (c *cdcOptCatalog) newCDCDataSource(
-	original catalog.TableDescriptor, familyID catid.FamilyID,
+	ctx context.Context, original catalog.TableDescriptor, familyID catid.FamilyID,
 ) (cat.DataSource, error) {
 	d, err := newFamilyTableDescriptor(original, familyID, c.extraColumns)
 	if err != nil {
 		return nil, err
 	}
-	return newOptTable(d, c.codec(), nil /* stats */, emptyZoneConfig)
+	return newOptTable(ctx, d, c.codec(), nil /* stats */, emptyZoneConfig)
 }
 
 // familyTableDescriptor wraps underlying catalog.TableDescriptor,
@@ -454,8 +468,9 @@ func newFamilyTableDescriptor(
 	}
 
 	// Add system columns -- those are always available.
-	includeSet.Add(colinfo.MVCCTimestampColumnID)
-	includeSet.Add(colinfo.TableOIDColumnID)
+	for _, col := range colinfo.AllSystemColumnDescs {
+		includeSet.Add(col.ID)
+	}
 
 	return &familyTableDescriptor{
 		TableDescriptor: original,

@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rpc
 
@@ -182,6 +177,12 @@ func TestClockOffsetMetrics(t *testing.T) {
 	}
 	if a, e := monitor.Metrics().ClockOffsetStdDevNanos.Value(), int64(7); a != e {
 		t.Errorf("stdDev %d != expected %d", a, e)
+	}
+	if a, e := monitor.Metrics().ClockOffsetMedianNanos.Value(), int64(13); a != e {
+		t.Errorf("median %d != expected %d", a, e)
+	}
+	if a, e := monitor.Metrics().ClockOffsetMedianAbsDevNanos.Value(), int64(7); a != e {
+		t.Errorf("MAD %d != expected %d", a, e)
 	}
 }
 

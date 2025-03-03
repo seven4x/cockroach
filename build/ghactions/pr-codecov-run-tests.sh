@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2023 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 output_json_file="$1"
@@ -42,6 +48,7 @@ echo "Running tests"
 
 # TODO(radu): do we need --strip=never?
 bazel coverage \
+  --config=crosslinux \
   --@io_bazel_rules_go//go/config:cover_format=lcov --combined_report=lcov \
   --instrumentation_filter="//pkg/..." \
   ${targets}

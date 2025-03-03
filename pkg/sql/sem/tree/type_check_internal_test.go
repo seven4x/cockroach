@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
@@ -36,10 +31,8 @@ func BenchmarkTypeCheck(b *testing.B) {
 	if err != nil {
 		b.Fatalf("%s: %v", expr, err)
 	}
-	ctx := tree.MakeSemaContext()
-	if err := ctx.Placeholders.Init(1 /* numPlaceholders */, nil /* typeHints */); err != nil {
-		b.Fatal(err)
-	}
+	ctx := tree.MakeSemaContext(nil /* resolver */)
+	ctx.Placeholders.Init(1 /* numPlaceholders */, nil /* typeHints */)
 	for i := 0; i < b.N; i++ {
 		_, err := tree.TypeCheck(context.Background(), expr, &ctx, types.Int)
 		if err != nil {
@@ -67,8 +60,8 @@ func TestTypeCheckNormalize(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			semaCtx := tree.MakeSemaContext()
-			typeChecked, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+			semaCtx := tree.MakeSemaContext(nil /* resolver */)
+			typeChecked, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -136,6 +129,11 @@ func ddecimal(f float64) copyableExpr {
 		return dd
 	}
 }
+func dfloat(f float64) copyableExpr {
+	return func() tree.Expr {
+		return tree.NewDFloat(tree.DFloat(f))
+	}
+}
 func placeholder(id tree.PlaceholderIdx) copyableExpr {
 	return func() tree.Expr {
 		return newPlaceholder(id)
@@ -182,11 +180,9 @@ func attemptTypeCheckSameTypedExprs(t *testing.T, idx int, test sameTypedExprsTe
 	}
 	ctx := context.Background()
 	forEachPerm(test.exprs, 0, func(exprs []copyableExpr) {
-		semaCtx := tree.MakeSemaContext()
-		if err := semaCtx.Placeholders.Init(len(test.ptypes), clonePlaceholderTypes(test.ptypes)); err != nil {
-			t.Fatal(err)
-		}
-		desired := types.Any
+		semaCtx := tree.MakeSemaContext(nil /* resolver */)
+		semaCtx.Placeholders.Init(len(test.ptypes), clonePlaceholderTypes(test.ptypes))
+		desired := types.AnyElement
 		if test.desired != nil {
 			desired = test.desired
 		}
@@ -299,6 +295,11 @@ func TestTypeCheckSameTypedTupleExprs(t *testing.T) {
 		{nil, ttuple(types.Int, types.Decimal), exprs(tuple(intConst("1"), intConst("1")), tuple(intConst("1"), intConst("1"))), ttuple(types.Int, types.Decimal), nil},
 		// Verify desired type when possible with unresolved constants.
 		{ptypesNone, ttuple(types.Int, types.Decimal), exprs(tuple(placeholder(0), intConst("1")), tuple(intConst("1"), placeholder(1))), ttuple(types.Int, types.Decimal), ptypesIntAndDecimal},
+		// Verify CASTs are in the direction of the non-null expression.
+		{nil, nil, exprs(tuple(dnull), dnull, tuple(dint(1)), dnull), ttuple(types.Int), nil},
+		{nil, nil, exprs(tuple(dint(1)), dnull, tuple(dnull), dnull), ttuple(types.Int), nil},
+		{nil, nil, exprs(dnull, tuple(dint(1), dnull), tuple(dnull, dfloat(1)), dnull), ttuple(types.Int, types.Float), nil},
+		{nil, nil, exprs(tuple(dint(1), dnull, dnull), tuple(dnull, ddecimal(1), dnull), dnull, tuple(dnull, dnull, dfloat(1)), dnull), ttuple(types.Int, types.Decimal, types.Float), nil},
 	} {
 		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
 			attemptTypeCheckSameTypedExprs(t, i, d)
@@ -334,11 +335,9 @@ func TestTypeCheckSameTypedExprsError(t *testing.T) {
 	ctx := context.Background()
 	for i, d := range testData {
 		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
-			semaCtx := tree.MakeSemaContext()
-			if err := semaCtx.Placeholders.Init(len(d.ptypes), d.ptypes); err != nil {
-				t.Error(err)
-			}
-			desired := types.Any
+			semaCtx := tree.MakeSemaContext(nil /* resolver */)
+			semaCtx.Placeholders.Init(len(d.ptypes), d.ptypes)
+			desired := types.AnyElement
 			if d.desired != nil {
 				desired = d.desired
 			}
@@ -376,11 +375,9 @@ func TestTypeCheckSameTypedExprsImplicitCastOneWay(t *testing.T) {
 	ctx := context.Background()
 	for i, d := range testData {
 		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
-			semaCtx := tree.MakeSemaContext()
-			if err := semaCtx.Placeholders.Init(len(d.ptypes), d.ptypes); err != nil {
-				t.Error(err)
-			}
-			desired := types.Any
+			semaCtx := tree.MakeSemaContext(nil /* resolver */)
+			semaCtx.Placeholders.Init(len(d.ptypes), d.ptypes)
+			desired := types.AnyElement
 			if d.desired != nil {
 				desired = d.desired
 			}
@@ -414,7 +411,7 @@ func TestProcessPlaceholderAnnotations(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	intType := types.Int
 	boolType := types.Bool
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 
 	testData := []struct {
 		initArgs  tree.PlaceholderTypes
@@ -594,7 +591,7 @@ func TestProcessPlaceholderAnnotationsError(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	intType := types.Int
 	floatType := types.Float
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 
 	testData := []struct {
 		initArgs  tree.PlaceholderTypes

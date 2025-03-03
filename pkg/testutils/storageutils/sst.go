@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storageutils
 
@@ -31,6 +26,16 @@ func MakeSST(
 	t *testing.T, st *cluster.Settings, kvs []interface{},
 ) ([]byte, roachpb.Key, roachpb.Key) {
 	t.Helper()
+	return MakeSSTWithPrefix(t, st, nil, kvs)
+}
+
+// MakeSST builds a binary in-memory SST from the given KVs, which can be both
+// MVCCKeyValue or MVCCRangeKeyValue. It returns the binary SST data as well as
+// the start and end (exclusive) keys of the SST.
+func MakeSSTWithPrefix(
+	t *testing.T, st *cluster.Settings, prefix roachpb.Key, kvs []interface{},
+) ([]byte, roachpb.Key, roachpb.Key) {
+	t.Helper()
 
 	sstFile := &storage.MemObject{}
 	writer := storage.MakeIngestionSSTWriter(context.Background(), st, sstFile)
@@ -41,6 +46,11 @@ func MakeSST(
 		var s, e roachpb.Key
 		switch kv := kvI.(type) {
 		case storage.MVCCKeyValue:
+			if len(prefix) > 0 {
+				k, err := keys.RewriteKeyToTenantPrefix(kv.Key.Key, prefix)
+				require.NoError(t, err)
+				kv.Key.Key = k
+			}
 			if kv.Key.Timestamp.IsEmpty() {
 				v, err := protoutil.Marshal(&enginepb.MVCCMetadata{RawBytes: kv.Value})
 				require.NoError(t, err)

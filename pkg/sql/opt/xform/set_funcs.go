@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -37,7 +32,7 @@ func (c *CustomFuncs) GenerateStreamingSetOp(
 	right memo.RelExpr,
 	private *memo.SetPrivate,
 ) {
-	orders := ordering.DeriveInterestingOrderings(grp)
+	orders := ordering.DeriveInterestingOrderings(c.e.mem, grp)
 	for _, order := range orders {
 		// A streaming set operation must have an ordering that includes all output
 		// columns. If the interesting ordering includes some columns but not all,

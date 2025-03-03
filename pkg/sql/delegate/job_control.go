@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package delegate
 
@@ -46,10 +41,10 @@ func (d *delegator) delegateJobControl(stmt ControlJobsDelegate) (tree.Statement
 	// from the control specific methods in pkg/jobs/jobs.go. All other states are
 	// either invalid starting states or result in no-ops.
 
-	validStartStatusForCommand := map[tree.JobCommand][]jobs.Status{
-		tree.PauseJob:  {jobs.StatusPending, jobs.StatusRunning, jobs.StatusReverting},
-		tree.ResumeJob: {jobs.StatusPaused},
-		tree.CancelJob: {jobs.StatusPending, jobs.StatusRunning, jobs.StatusPaused},
+	validStartStatusForCommand := map[tree.JobCommand][]jobs.State{
+		tree.PauseJob:  {jobs.StatePending, jobs.StateRunning, jobs.StateReverting},
+		tree.ResumeJob: {jobs.StatePaused},
+		tree.CancelJob: {jobs.StatePending, jobs.StateRunning, jobs.StatePaused},
 	}
 
 	var filterExprs []string

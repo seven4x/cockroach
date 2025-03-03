@@ -1,27 +1,22 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 )
 
@@ -29,11 +24,6 @@ type descriptorState struct {
 	m       *Manager
 	id      descpb.ID
 	stopper *stop.Stopper
-
-	// renewalInProgress is an atomic indicator for when a renewal for a
-	// lease has begun. This is atomic to prevent multiple routines from
-	// entering renewal initialization.
-	renewalInProgress int32
 
 	mu struct {
 		syncutil.Mutex
@@ -108,7 +98,7 @@ func (t *descriptorState) findForTimestamp(
 		// Check to see if the ModificationTime is valid.
 		if desc := t.mu.active.data[i]; desc.GetModificationTime().LessEq(timestamp) {
 			latest := i+1 == len(t.mu.active.data)
-			if !desc.hasExpired(timestamp) {
+			if !desc.hasExpired(ctx, timestamp) {
 				// Existing valid descriptor version.
 				desc.incRefCount(ctx, expensiveLogEnabled)
 				return desc, latest, nil
@@ -131,8 +121,11 @@ func (t *descriptorState) findForTimestamp(
 // it and returns it. The regionEnumPrefix is used if the cluster is configured
 // for multi-region system tables.
 func (t *descriptorState) upsertLeaseLocked(
-	ctx context.Context, desc catalog.Descriptor, expiration hlc.Timestamp, regionEnumPrefix []byte,
-) (createdDescriptorVersionState *descriptorVersionState, toRelease *storedLease, _ error) {
+	ctx context.Context,
+	desc catalog.Descriptor,
+	session sqlliveness.Session,
+	regionEnumPrefix []byte,
+) error {
 	if t.mu.maxVersionSeen < desc.GetVersion() {
 		t.mu.maxVersionSeen = desc.GetVersion()
 	}
@@ -141,38 +134,30 @@ func (t *descriptorState) upsertLeaseLocked(
 		if t.mu.active.findNewest() != nil {
 			log.Infof(ctx, "new lease: %s", desc)
 		}
-		descState := newDescriptorVersionState(t, desc, expiration, regionEnumPrefix, true /* isLease */)
+		descState := newDescriptorVersionState(t, desc, hlc.Timestamp{}, session, regionEnumPrefix, true /* isLease */)
 		t.mu.active.insert(descState)
-		return descState, nil, nil
+		t.m.names.insert(ctx, descState)
+		return nil
+	}
+	// If the version already exists and the session ID matches nothing
+	// needs to be done.
+	if s.getSessionID() == session.ID() {
+		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// The desc is replacing an existing one at the same version.
-	if !s.mu.expiration.Less(expiration) {
-		// This is a violation of an invariant and can actually not
-		// happen. We return an error here to aid in further investigations.
-		return nil, nil, errors.AssertionFailedf("lease expiration monotonicity violation, (%s) vs (%s)", s, desc)
-	}
-
-	// subsume the refcount of the older lease. This is permitted because
-	// the new lease has a greater expiration than the older lease and
-	// any transaction using the older lease can safely use a deadline set
-	// to the older lease's expiration even though the older lease is
-	// released! This is because the new lease is valid at the same desc
-	// version at a greater expiration.
-	s.mu.expiration = expiration
-	toRelease = s.mu.lease
-	s.mu.lease = &storedLease{
-		prefix:     regionEnumPrefix,
-		id:         desc.GetID(),
-		version:    int(desc.GetVersion()),
-		expiration: storedLeaseExpiration(expiration),
-	}
-	if log.ExpensiveLogEnabled(ctx, 2) {
-		log.VEventf(ctx, 2, "replaced lease: %s with %s", toRelease, s.mu.lease)
-	}
-	return nil, toRelease, nil
+	// Otherwise, we need to update the existing lease to fix the session ID. The
+	// previously stored lease also needs to be deleted.
+	var existingLease storedLease
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		existingLease = *s.mu.lease
+		s.mu.lease.sessionID = session.ID().UnsafeBytes()
+		s.mu.session = session
+	}()
+	// Delete the existing lease on behalf of the caller.
+	t.m.storage.release(ctx, t.m.stopper, &existingLease)
+	return nil
 }
 
 var _ redact.SafeFormatter = (*descriptorVersionState)(nil)
@@ -181,6 +166,7 @@ func newDescriptorVersionState(
 	t *descriptorState,
 	desc catalog.Descriptor,
 	expiration hlc.Timestamp,
+	session sqlliveness.Session,
 	prefix []byte,
 	isLease bool,
 ) *descriptorVersionState {
@@ -188,15 +174,21 @@ func newDescriptorVersionState(
 		t:          t,
 		Descriptor: desc,
 	}
-	descState.mu.expiration = expiration
 	if isLease {
 		descState.mu.lease = &storedLease{
-			id:         desc.GetID(),
-			prefix:     prefix,
-			version:    int(desc.GetVersion()),
-			expiration: storedLeaseExpiration(expiration),
+			id:      desc.GetID(),
+			prefix:  prefix,
+			version: int(desc.GetVersion()),
+		}
+		descState.mu.lease.sessionID = session.ID().UnsafeBytes()
+		if buildutil.CrdbTestBuild && !expiration.IsEmpty() {
+			panic(errors.AssertionFailedf("expiration should always be empty for "+
+				"session based leases (got: %s on Desc: %s(%d))", expiration.String(), desc.GetName(), desc.GetID()))
 		}
 	}
+	descState.mu.session = session
+	descState.mu.expiration = expiration
+
 	return descState
 }
 
@@ -273,7 +265,18 @@ func (t *descriptorState) release(ctx context.Context, s *descriptorVersionState
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if l := maybeMarkRemoveStoredLease(s); l != nil {
-			t.mu.active.remove(s)
+			leaseReleased := true
+			// For testing, we will synchronously release leases, but that
+			// exposes us to the danger of the context getting cancelled. To
+			// eliminate this risk, we are going first remove the lease from
+			// storage and then delete if from mqemory.
+			if t.m.storage.testingKnobs.RemoveOnceDereferenced {
+				leaseReleased = releaseLease(ctx, l, t.m)
+				l = nil
+			}
+			if leaseReleased {
+				t.mu.active.remove(s)
+			}
 			return l
 		}
 		return nil
@@ -281,47 +284,6 @@ func (t *descriptorState) release(ctx context.Context, s *descriptorVersionState
 	if l := maybeRemoveLease(); l != nil {
 		releaseLease(ctx, l, t.m)
 	}
-}
-
-// maybeQueueLeaseRenewal queues a lease renewal if there is not already a lease
-// renewal in progress.
-func (t *descriptorState) maybeQueueLeaseRenewal(
-	ctx context.Context, m *Manager, id descpb.ID, name string,
-) error {
-	if !atomic.CompareAndSwapInt32(&t.renewalInProgress, 0, 1) {
-		return nil
-	}
-
-	// Start the renewal. When it finishes, it will reset t.renewalInProgress.
-	newCtx := m.ambientCtx.AnnotateCtx(context.Background())
-	// AddTags and not WithTags, so that we combine the tags with those
-	// filled by AnnotateCtx.
-	newCtx = logtags.AddTags(newCtx, logtags.FromContext(ctx))
-	return t.stopper.RunAsyncTask(newCtx,
-		"lease renewal", func(ctx context.Context) {
-			t.startLeaseRenewal(ctx, m, id, name)
-		})
-}
-
-// startLeaseRenewal starts a singleflight.Group to acquire a lease.
-// This function blocks until lease acquisition completes.
-// t.renewalInProgress must be set to 1 before calling.
-func (t *descriptorState) startLeaseRenewal(
-	ctx context.Context, m *Manager, id descpb.ID, name string,
-) {
-	log.VEventf(ctx, 1,
-		"background lease renewal beginning for id=%d name=%q",
-		id, name)
-	if _, err := acquireNodeLease(ctx, m, id, AcquireBackground); err != nil {
-		log.Errorf(ctx,
-			"background lease renewal for id=%d name=%q failed: %s",
-			id, name, err)
-	} else {
-		log.VEventf(ctx, 1,
-			"background lease renewal finished for id=%d name=%q",
-			id, name)
-	}
-	atomic.StoreInt32(&t.renewalInProgress, 0)
 }
 
 // markAcquisitionStart increments the acquisitionsInProgress counter.

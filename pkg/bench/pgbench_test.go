@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bench
 
@@ -22,6 +17,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -112,7 +108,7 @@ func BenchmarkPgbenchExec(b *testing.B) {
 		s := serverutils.StartServerOnly(b, base.TestServerArgs{Insecure: true})
 		defer s.Stopper().Stop(context.Background())
 
-		pgURL, cleanupFn := sqlutils.PGUrl(
+		pgURL, cleanupFn := pgurlutils.PGUrl(
 			b, s.AdvSQLAddr(), "benchmarkCockroach", url.User(username.RootUser))
 		pgURL.RawQuery = "sslmode=disable"
 		defer cleanupFn()

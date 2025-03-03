@@ -1,24 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
 import (
-	"context"
 	"fmt"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -30,6 +23,8 @@ var errRetryJobSentinel = errors.New("retriable job error")
 
 // MarkAsRetryJobError marks an error as a retriable job error which
 // indicates that the registry should retry the job.
+// Note that if a job is _not_ in the NonCancelable state, it will _only_ be
+// retried if the error has been marked as a retry job error.
 func MarkAsRetryJobError(err error) error {
 	return errors.Mark(err, errRetryJobSentinel)
 }
@@ -42,8 +37,10 @@ func IsRetryJobError(err error) bool {
 // Registry does not retry a job that fails due to a permanent error.
 var errJobPermanentSentinel = errors.New("permanent job error")
 
-// MarkAsPermanentJobError marks an error as a permanent job error, which indicates
-// Registry to not retry the job when it fails due to this error.
+// MarkAsPermanentJobError marks an error as a permanent job error, which
+// indicates Registry to not retry the job when it fails due to this error.
+// Note that if a job is in the NonCancelable state, it will always be retried
+// _unless_ the error has been marked as permanent job error.
 func MarkAsPermanentJobError(err error) error {
 	return errors.Mark(err, errJobPermanentSentinel)
 }
@@ -77,27 +74,27 @@ const PauseRequestExplained = "pausing due to error; use RESUME JOB to try to pr
 // knows or finds out it no longer has a job lease.
 var errJobLeaseNotHeld = errors.New("job lease not held")
 
-// InvalidStatusError is the error returned when the desired operation is
-// invalid given the job's current status.
-type InvalidStatusError struct {
-	id     jobspb.JobID
-	status Status
-	op     string
-	err    string
+// InvalidStateError is the error returned when the desired operation is
+// invalid given the job's current state.
+type InvalidStateError struct {
+	id    jobspb.JobID
+	state State
+	op    string
+	err   string
 }
 
-func (e *InvalidStatusError) Error() string {
+func (e *InvalidStateError) Error() string {
 	if e.err != "" {
-		return fmt.Sprintf("cannot %s %s job (id %d, err: %q)", e.op, e.status, e.id, e.err)
+		return fmt.Sprintf("cannot %s %s job (id %d, err: %q)", e.op, e.state, e.id, e.err)
 	}
-	return fmt.Sprintf("cannot %s %s job (id %d)", e.op, e.status, e.id)
+	return fmt.Sprintf("cannot %s %s job (id %d)", e.op, e.state, e.id)
 }
 
-// SimplifyInvalidStatusError unwraps an *InvalidStatusError into an error
+// SimplifyInvalidStateError unwraps an *InvalidStateError into an error
 // message suitable for users. Other errors are returned as passed.
-func SimplifyInvalidStatusError(err error) error {
-	if ierr := (*InvalidStatusError)(nil); errors.As(err, &ierr) {
-		return errors.Errorf("job %s", ierr.status)
+func SimplifyInvalidStateError(err error) error {
+	if ierr := (*InvalidStateError)(nil); errors.As(err, &ierr) {
+		return errors.Errorf("job %s", ierr.state)
 	}
 	return err
 }
@@ -108,17 +105,16 @@ func SimplifyInvalidStatusError(err error) error {
 type retriableExecutionError struct {
 	instanceID base.SQLInstanceID
 	start, end time.Time
-	status     Status
+	state      State
 	cause      error
 }
 
 func newRetriableExecutionError(
-	instanceID base.SQLInstanceID, status Status, start, end time.Time, cause error,
+	instanceID base.SQLInstanceID, state State, end time.Time, cause error,
 ) *retriableExecutionError {
 	return &retriableExecutionError{
 		instanceID: instanceID,
-		status:     status,
-		start:      start,
+		state:      state,
 		end:        end,
 		cause:      cause,
 	}
@@ -127,13 +123,13 @@ func newRetriableExecutionError(
 // Error makes retriableExecutionError and error.
 func (e *retriableExecutionError) Error() string {
 	return formatRetriableExecutionFailure(
-		e.instanceID, e.status, e.start, e.end, e.cause,
+		e.instanceID, e.state, e.start, e.end, e.cause,
 	)
 
 }
 
 func formatRetriableExecutionFailure(
-	instanceID base.SQLInstanceID, status Status, start, end time.Time, cause error,
+	instanceID base.SQLInstanceID, state State, start, end time.Time, cause error,
 ) string {
 	mustTimestamp := func(ts time.Time) *tree.DTimestamp {
 		ret, _ := tree.MakeDTimestamp(ts, time.Microsecond)
@@ -141,7 +137,7 @@ func formatRetriableExecutionFailure(
 	}
 	return fmt.Sprintf(
 		"%s execution from %v to %v on %d failed: %v",
-		status,
+		state,
 		mustTimestamp(start),
 		mustTimestamp(end),
 		instanceID,
@@ -164,27 +160,4 @@ func (e *retriableExecutionError) SafeFormatError(p errors.Printer) error {
 		p.Printf("retriable execution error")
 	}
 	return e.cause
-}
-
-func (e *retriableExecutionError) toRetriableExecutionFailure(
-	ctx context.Context, maxErrorSize int,
-) *jobspb.RetriableExecutionFailure {
-	// If the cause is too large, we format it, losing all structure, and retain
-	// a prefix.
-	ef := &jobspb.RetriableExecutionFailure{
-		Status:               string(e.status),
-		ExecutionStartMicros: timeutil.ToUnixMicros(e.start),
-		ExecutionEndMicros:   timeutil.ToUnixMicros(e.end),
-		InstanceID:           e.instanceID,
-	}
-	if encodedCause := errors.EncodeError(ctx, e.cause); encodedCause.Size() < maxErrorSize {
-		ef.Error = &encodedCause
-	} else {
-		formatted := e.cause.Error()
-		if len(formatted) > maxErrorSize {
-			formatted = formatted[:maxErrorSize]
-		}
-		ef.TruncatedError = formatted
-	}
-	return ef
 }

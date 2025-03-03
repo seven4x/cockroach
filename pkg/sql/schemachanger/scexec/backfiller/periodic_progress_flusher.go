@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package backfiller
 
@@ -17,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"golang.org/x/sync/errgroup"
 )
@@ -59,7 +55,7 @@ type periodicProgressFlusher struct {
 
 func (p *periodicProgressFlusher) StartPeriodicUpdates(
 	ctx context.Context, tracker scexec.BackfillerProgressFlusher,
-) (stop func() error) {
+) (stop func()) {
 	stopCh := make(chan struct{})
 	runPeriodicWrite := func(
 		ctx context.Context,
@@ -78,7 +74,7 @@ func (p *periodicProgressFlusher) StartPeriodicUpdates(
 			case <-timer.Ch():
 				timer.MarkRead()
 				if err := write(ctx); err != nil {
-					return err
+					log.Warningf(ctx, "could not flush progress: %v", err)
 				}
 			}
 		}
@@ -93,11 +89,13 @@ func (p *periodicProgressFlusher) StartPeriodicUpdates(
 			ctx, tracker.FlushCheckpoint, p.checkpointInterval)
 	})
 	toClose := stopCh // make the returned function idempotent
-	return func() error {
+	return func() {
 		if toClose != nil {
 			close(toClose)
 			toClose = nil
 		}
-		return g.Wait()
+		if err := g.Wait(); err != nil {
+			log.Warningf(ctx, "waiting for progress flushing goroutines: %v", err)
+		}
 	}
 }

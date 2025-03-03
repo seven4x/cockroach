@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -55,7 +50,7 @@ func (e *inlineScheduledJobExecutor) ExecuteJob(
 	// Also, performing this under the same transaction as the scan loop is not ideal
 	// since a single failure would result in rollback for all of the changes.
 	_, err := txn.ExecEx(ctx, "inline-exec", txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		sqlArgs.Statement,
 	)
 
@@ -72,13 +67,13 @@ func (e *inlineScheduledJobExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus Status,
+	jobState State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	schedule *ScheduledJob,
 ) error {
-	// For now, only interested in failed status.
-	if jobStatus == StatusFailed {
+	// For now, only interested in failed state.
+	if jobState == StateFailed {
 		DefaultHandleFailedRun(schedule, "job %d failed", jobID)
 	}
 	return nil

@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rpc
 
@@ -27,9 +22,11 @@ import (
 
 // RemoteClockMetrics is the collection of metrics for the clock monitor.
 type RemoteClockMetrics struct {
-	ClockOffsetMeanNanos   *metric.Gauge
-	ClockOffsetStdDevNanos *metric.Gauge
-	RoundTripLatency       metric.IHistogram
+	ClockOffsetMeanNanos         *metric.Gauge
+	ClockOffsetStdDevNanos       *metric.Gauge
+	ClockOffsetMedianNanos       *metric.Gauge
+	ClockOffsetMedianAbsDevNanos *metric.Gauge
+	RoundTripLatency             metric.IHistogram
 }
 
 // avgLatencyMeasurementAge determines how to exponentially weight the
@@ -52,7 +49,24 @@ var (
 		Measurement: "Clock Offset",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
-
+	metaClockOffsetMedianNanos = metric.Metadata{
+		// An outlier resistant measure of centrality, useful for
+		// diagnosing unhealthy nodes.
+		// Demo: https://docs.google.com/spreadsheets/d/1gmzQxEVYDKb_b-Mn50ZTje-LqZw6TZwUxxUPY2rG69M/edit?gid=0#gid=0
+		Name:        "clock-offset.mediannanos",
+		Help:        "Median clock offset with other nodes",
+		Measurement: "Clock Offset",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaClockOffsetMedianAbsDevNanos = metric.Metadata{
+		// An outlier resistant measure of dispersion, see
+		// https://en.wikipedia.org/wiki/Median_absolute_deviation
+		// and demo above.
+		Name:        "clock-offset.medianabsdevnanos",
+		Help:        "Median Absolute Deviation (MAD) with other nodes",
+		Measurement: "Clock Offset",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 	metaConnectionRoundTripLatency = metric.Metadata{
 		// NB: the name is legacy and should not be changed since customers
 		// rely on it.
@@ -148,8 +162,10 @@ func newRemoteClockMonitor(
 		histogramWindowInterval = time.Duration(math.MaxInt64)
 	}
 	r.metrics = RemoteClockMetrics{
-		ClockOffsetMeanNanos:   metric.NewGauge(metaClockOffsetMeanNanos),
-		ClockOffsetStdDevNanos: metric.NewGauge(metaClockOffsetStdDevNanos),
+		ClockOffsetMeanNanos:         metric.NewGauge(metaClockOffsetMeanNanos),
+		ClockOffsetStdDevNanos:       metric.NewGauge(metaClockOffsetStdDevNanos),
+		ClockOffsetMedianNanos:       metric.NewGauge(metaClockOffsetMedianNanos),
+		ClockOffsetMedianAbsDevNanos: metric.NewGauge(metaClockOffsetMedianAbsDevNanos),
 		RoundTripLatency: metric.NewHistogram(metric.HistogramOptions{
 			Mode:     metric.HistogramModePreferHdrLatency,
 			Metadata: metaConnectionRoundTripLatency,
@@ -322,22 +338,24 @@ func (r *RemoteClockMonitor) VerifyClockOffset(ctx context.Context) error {
 	now := r.clock.Now()
 	healthyOffsetCount := 0
 
-	r.mu.Lock()
-	// Each measurement is recorded as its minimum and maximum value.
-	offsets := make(stats.Float64Data, 0, 2*len(r.mu.offsets))
-	for id, offset := range r.mu.offsets {
-		if offset.isStale(r.offsetTTL, now) {
-			delete(r.mu.offsets, id)
-			continue
+	offsets, numClocks := func() (stats.Float64Data, int) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		// Each measurement is recorded as its minimum and maximum value.
+		offs := make(stats.Float64Data, 0, 2*len(r.mu.offsets))
+		for id, offset := range r.mu.offsets {
+			if offset.isStale(r.offsetTTL, now) {
+				delete(r.mu.offsets, id)
+				continue
+			}
+			offs = append(offs, float64(offset.Offset+offset.Uncertainty))
+			offs = append(offs, float64(offset.Offset-offset.Uncertainty))
+			if offset.isHealthy(ctx, r.toleratedOffset) {
+				healthyOffsetCount++
+			}
 		}
-		offsets = append(offsets, float64(offset.Offset+offset.Uncertainty))
-		offsets = append(offsets, float64(offset.Offset-offset.Uncertainty))
-		if offset.isHealthy(ctx, r.toleratedOffset) {
-			healthyOffsetCount++
-		}
-	}
-	numClocks := len(r.mu.offsets)
-	r.mu.Unlock()
+		return offs, len(r.mu.offsets)
+	}()
 
 	mean, err := offsets.Mean()
 	if err != nil && !errors.Is(err, stats.EmptyInput) {
@@ -347,8 +365,18 @@ func (r *RemoteClockMonitor) VerifyClockOffset(ctx context.Context) error {
 	if err != nil && !errors.Is(err, stats.EmptyInput) {
 		return err
 	}
+	median, err := offsets.Median()
+	if err != nil && !errors.Is(err, stats.EmptyInput) {
+		return err
+	}
+	medianAbsoluteDeviation, err := offsets.MedianAbsoluteDeviation()
+	if err != nil && !errors.Is(err, stats.EmptyInput) {
+		return err
+	}
 	r.metrics.ClockOffsetMeanNanos.Update(int64(mean))
 	r.metrics.ClockOffsetStdDevNanos.Update(int64(stdDev))
+	r.metrics.ClockOffsetMedianNanos.Update(int64(median))
+	r.metrics.ClockOffsetMedianAbsDevNanos.Update(int64(medianAbsoluteDeviation))
 
 	if numClocks > 0 && healthyOffsetCount <= numClocks/2 {
 		return errors.Errorf(
@@ -389,6 +417,9 @@ func (r RemoteOffset) isHealthy(ctx context.Context, toleratedOffset time.Durati
 }
 
 func (r RemoteOffset) isStale(ttl time.Duration, now time.Time) bool {
+	if ttl == 0 {
+		return false // ttl disabled
+	}
 	return r.measuredAt().Add(ttl).Before(now)
 }
 

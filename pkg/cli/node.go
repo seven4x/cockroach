@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -26,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
@@ -51,13 +47,14 @@ To retrieve the IDs for inactive members, see 'node status --decommission'.
 }
 
 func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
-	conn, err := makeSQLClient("cockroach node ls", useSystemDb)
+	ctx := context.Background()
+	// TODO(ssd): We can potentially make this work against
+	// secondary tenants using sql_instances.
+	conn, err := makeTenantSQLClient(ctx, "cockroach node ls", useSystemDb, catconstants.SystemTenantName)
 	if err != nil {
 		return err
 	}
 	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
-
-	ctx := context.Background()
 
 	// TODO(knz): This can use a context deadline instead, now that
 	// query cancellation is supported.
@@ -210,7 +207,8 @@ SELECT node_id AS id,
        draining AS is_draining
 FROM crdb_internal.gossip_liveness LEFT JOIN crdb_internal.gossip_nodes USING (node_id)`
 
-	conn, err := makeSQLClient("cockroach node status", useSystemDb)
+	ctx := context.Background()
+	conn, err := makeTenantSQLClient(ctx, "cockroach node status", useSystemDb, catconstants.SystemTenantName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -228,7 +226,6 @@ FROM crdb_internal.gossip_liveness LEFT JOIN crdb_internal.gossip_nodes USING (n
 		queriesToJoin = append(queriesToJoin, decommissionQuery)
 	}
 
-	ctx := context.Background()
 	if err = conn.EnsureConn(ctx); err != nil {
 		return nil, nil, err
 	}
@@ -585,9 +582,11 @@ func runDecommissionNodeImpl(
 
 		anyActive := false
 		var replicaCount int64
+		statusByNodeID := map[roachpb.NodeID]serverpb.DecommissionStatusResponse_Status{}
 		for _, status := range resp.Status {
 			anyActive = anyActive || status.Membership.Active()
 			replicaCount += status.ReplicaCount
+			statusByNodeID[status.NodeID] = status
 		}
 
 		if !anyActive && replicaCount == 0 {
@@ -597,20 +596,36 @@ func runDecommissionNodeImpl(
 			for _, targetNode := range nodeIDs {
 				if targetNode == localNodeID {
 					// Skip the draining step for the node serving the request, if it is a target node.
-					log.Warningf(ctx,
-						"skipping drain step for node n%d; it is decommissioning and serving the request",
+					_, _ = fmt.Fprintf(stderr,
+						"skipping drain step for node n%d; it is decommissioning and serving the request\n",
 						localNodeID,
 					)
 					continue
 				}
-				drainReq := &serverpb.DrainRequest{
-					Shutdown: false,
-					DoDrain:  true,
-					NodeId:   targetNode.String(),
+				if status, ok := statusByNodeID[targetNode]; !ok || !status.IsLive {
+					// Skip the draining step for the node serving the request, if it is a target node.
+					_, _ = fmt.Fprintf(stderr,
+						"skipping drain step for node n%d; it is not live\n", targetNode,
+					)
+					continue
 				}
-				if _, err = c.Drain(ctx, drainReq); err != nil {
-					fmt.Fprintln(stderr)
-					return errors.Wrapf(err, "while trying to drain n%d", targetNode)
+				_, _ = fmt.Fprintf(stderr, "draining node n%d\n", targetNode)
+
+				if _, _, err := doDrain(ctx, c, targetNode.String()); err != nil {
+					// NB: doDrain already prints to stdErr.
+					//
+					// Defense in depth: in decommission invocations that don't have to
+					// do much work, if the target node was _just_ shutdown prior to
+					// starting `node decommission`, the node may be absent but the liveness
+					// status sent us here anyway. We don't want to fail out on the drain
+					// step to make the decommissioning command more robust.
+					_, _ = fmt.Fprintf(stderr,
+						"drain step for node n%d failed; decommissioning anyway\n", targetNode,
+					)
+					_ = err // discard intentionally
+				} else {
+					// NB: this output is matched on in the decommission/drains roachtest.
+					_, _ = fmt.Fprintf(stderr, "node n%d drained successfully\n", targetNode)
 				}
 			}
 
@@ -863,8 +878,8 @@ func runRecommissionNode(cmd *cobra.Command, args []string) error {
 }
 
 var drainNodeCmd = &cobra.Command{
-	Use:   "drain { --self | <node id> }",
-	Short: "drain a node without shutting it down",
+	Use:   "drain { --self | <node id> } [ --shutdown ] [ --drain-wait=timeout ] ",
+	Short: "drain a node and optionally shut it down",
 	Long: `
 Prepare a server so it becomes ready to be shut down safely.
 This causes the server to stop accepting client connections, stop
@@ -872,9 +887,10 @@ extant connections, and finally push range leases onto other
 nodes, subject to various timeout parameters configurable via
 cluster settings.
 
-After a successful drain, the server process is still running;
-use a service manager or orchestrator to terminate the process
-gracefully using e.g. a unix signal.
+After a successful drain, if the --shutdown flag is not specified,
+the server process is still running; use a service manager or
+orchestrator to terminate the process gracefully using e.g. a
+unix signal.
 
 If an argument is specified, the command affects the node
 whose ID is given. If --self is specified, the command
@@ -903,13 +919,6 @@ func runDrain(cmd *cobra.Command, args []string) (err error) {
 		targetNode = args[0]
 	}
 
-	// At the end, we'll report "ok" if there was no error.
-	defer func() {
-		if err == nil {
-			fmt.Println("ok")
-		}
-	}()
-
 	// Establish a RPC connection.
 	c, finish, err := getAdminClient(ctx, serverCfg)
 	if err != nil {
@@ -917,8 +926,22 @@ func runDrain(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer finish()
 
-	_, _, err = doDrain(ctx, c, targetNode)
-	return err
+	if _, _, err := doDrain(ctx, c, targetNode); err != nil {
+		return err
+	}
+
+	// Report "ok" if there was no error.
+	fmt.Println("drain ok")
+
+	if drainCtx.shutdown {
+		if _, err := doShutdown(ctx, c, targetNode); err != nil {
+			return err
+		}
+		// Report "ok" if there was no error.
+		fmt.Println("shutdown ok")
+	}
+
+	return nil
 }
 
 // Sub-commands for node command.

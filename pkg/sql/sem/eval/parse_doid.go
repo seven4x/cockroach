@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package eval
 
@@ -35,6 +30,10 @@ var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\."]+)\s*\((?:(?:\s*[\w"]+\s
 
 // ParseDOid parses and returns an Oid family datum.
 func ParseDOid(ctx context.Context, evalCtx *Context, s string, t *types.T) (*tree.DOid, error) {
+	if t.Oid() != oid.T_oid && s == tree.UnknownOidName {
+		return tree.NewDOidWithType(tree.UnknownOidValue, t), nil
+	}
+
 	// If it is an integer in string form, convert it as an int.
 	if _, err := tree.ParseDInt(strings.TrimSpace(s)); err == nil {
 		tmpOid, err := tree.ParseDOidAsInt(s)
@@ -73,13 +72,18 @@ func ParseDOid(ctx context.Context, evalCtx *Context, s string, t *types.T) (*tr
 		for i := 0; i < len(substrs); i++ {
 			name.Parts[i] = substrs[len(substrs)-1-i]
 		}
-		funcDef, err := evalCtx.Planner.ResolveFunction(ctx, &name, &evalCtx.SessionData().SearchPath)
+		funcDef, err := evalCtx.Planner.ResolveFunction(
+			ctx, tree.MakeUnresolvedFunctionName(&name), &evalCtx.SessionData().SearchPath,
+		)
 		if err != nil {
 			return nil, err
 		}
 		if len(funcDef.Overloads) > 1 {
 			return nil, pgerror.Newf(pgcode.AmbiguousAlias,
 				"more than one function named '%s'", funcDef.Name)
+		}
+		if funcDef.UnsupportedWithIssue != 0 {
+			return nil, funcDef.MakeUnsupportedError()
 		}
 		overload := funcDef.Overloads[0]
 		return tree.NewDOidWithTypeAndName(overload.Oid, t, funcDef.Name), nil
@@ -100,38 +104,44 @@ func ParseDOid(ctx context.Context, evalCtx *Context, s string, t *types.T) (*tr
 		}
 
 		un := fn.FuncName.ToUnresolvedObjectName().ToUnresolvedName()
-		fd, err := evalCtx.Planner.ResolveFunction(ctx, un, &evalCtx.SessionData().SearchPath)
+		fd, err := evalCtx.Planner.ResolveFunction(
+			ctx, tree.MakeUnresolvedFunctionName(un), &evalCtx.SessionData().SearchPath,
+		)
 		if err != nil {
 			return nil, err
 		}
 
 		if len(fd.Overloads) == 1 {
 			// This is a hack to be compatible with some ORMs which depends on some
-			// builtin function not implemented in CRDB. We just use `Any` as the arg
+			// builtin function not implemented in CRDB. We just use `AnyElement` as the arg
 			// type while some ORMs sends more meaningful function signatures whose
-			// arg type list mismatch with `Any` type. For this case we just
+			// arg type list mismatch with `AnyElement` type. For this case we just
 			// short-circuit it to return the oid. For example, `array_in` is defined
-			// to take in a `Any` type, but some ORM sends
+			// to take in a `AnyElement` type, but some ORM sends
 			// `'array_in(cstring,oid,integer)'::REGPROCEDURE` for introspection.
 			ol := fd.Overloads[0]
 			if !catid.IsOIDUserDefined(ol.Oid) &&
 				ol.Types.Length() == 1 &&
-				ol.Types.GetAt(0).Identical(types.Any) {
+				ol.Types.GetAt(0).Identical(types.AnyElement) {
 				return tree.NewDOidWithTypeAndName(ol.Oid, t, fd.Name), nil
 			}
 		}
 
-		paramTypes, err := fn.ParamTypes(ctx, evalCtx.Planner)
-		if err != nil {
-			return nil, err
-		}
-		ol, err := fd.MatchOverload(paramTypes, fn.FuncName.Schema(), &evalCtx.SessionData().SearchPath)
+		ol, err := fd.MatchOverload(
+			ctx,
+			evalCtx.Planner,
+			&fn,
+			&evalCtx.SessionData().SearchPath,
+			tree.BuiltinRoutine|tree.UDFRoutine|tree.ProcedureRoutine,
+			false, /* inDropContext */
+			false, /* tryDefaultExprs */
+		)
 		if err != nil {
 			return nil, err
 		}
 		return tree.NewDOidWithTypeAndName(ol.Oid, t, fd.Name), nil
 	case oid.T_regtype:
-		parsedTyp, err := evalCtx.Planner.GetTypeFromValidSQLSyntax(s)
+		parsedTyp, err := evalCtx.Planner.GetTypeFromValidSQLSyntax(ctx, s)
 		if err == nil {
 			return tree.NewDOidWithTypeAndName(
 				parsedTyp.Oid(), t, parsedTyp.SQLStandardName(),

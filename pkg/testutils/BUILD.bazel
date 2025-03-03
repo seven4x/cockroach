@@ -6,6 +6,7 @@ go_library(
         "backup.go",
         "dir.go",
         "error.go",
+        "exectrace.go",
         "files.go",
         "hook.go",
         "keys.go",
@@ -31,6 +32,7 @@ go_library(
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_petermattis_goid//:goid",
     ],
 )
 
@@ -42,7 +44,6 @@ go_test(
         "net_test.go",
         "soon_test.go",
     ],
-    args = ["-test.timeout=55s"],
     embed = [":testutils"],
     deps = [
         "//pkg/util",

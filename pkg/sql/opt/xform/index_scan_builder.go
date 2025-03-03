@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -93,6 +88,7 @@ func (b *indexScanBuilder) AddConstProjections(proj memo.ProjectionsExpr) {
 func (b *indexScanBuilder) AddInvertedFilter(
 	spanExpr *inverted.SpanExpression,
 	pfState *invertedexpr.PreFiltererStateForInvertedFilterer,
+	pkCols opt.ColSet,
 	invertedCol opt.ColumnID,
 ) {
 	if spanExpr != nil {
@@ -105,6 +101,7 @@ func (b *indexScanBuilder) AddInvertedFilter(
 		b.invertedFilterPrivate = memo.InvertedFilterPrivate{
 			InvertedExpression: spanExpr,
 			PreFiltererState:   pfState,
+			PKCols:             pkCols,
 			InvertedColumn:     invertedCol,
 		}
 	}
@@ -275,11 +272,23 @@ func (b *indexScanBuilder) Build(grp memo.RelExpr) {
 	// 4. Wrap input in inverted filter if it was added.
 	if b.hasInvertedFilter() {
 		if !b.hasIndexJoin() {
-			invertedFilter := &memo.InvertedFilterExpr{
-				Input: input, InvertedFilterPrivate: b.invertedFilterPrivate,
+			// An inverted filter can only project-away the inverted column. If
+			// more columns must be pruned, then a project expression is needed.
+			extraCols := input.Relational().OutputCols.Difference(grp.Relational().OutputCols)
+			if extraCols.SingletonOf(b.invertedFilterPrivate.InvertedColumn) {
+				invertedFilter := &memo.InvertedFilterExpr{
+					Input: input, InvertedFilterPrivate: b.invertedFilterPrivate,
+				}
+				b.mem.AddInvertedFilterToGroup(invertedFilter, grp)
+				return
+			} else {
+				project := &memo.ProjectExpr{
+					Input:       b.f.ConstructInvertedFilter(input, &b.invertedFilterPrivate),
+					Passthrough: grp.Relational().OutputCols,
+				}
+				b.mem.AddProjectToGroup(project, grp)
+				return
 			}
-			b.mem.AddInvertedFilterToGroup(invertedFilter, grp)
-			return
 		}
 
 		input = b.f.ConstructInvertedFilter(input, &b.invertedFilterPrivate)

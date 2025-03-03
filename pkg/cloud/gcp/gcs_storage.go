@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gcp
 
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/cloud/cloudpb"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -37,6 +31,7 @@ import (
 	"google.golang.org/api/impersonate"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	gtransport "google.golang.org/api/transport/http"
 )
 
 const (
@@ -61,7 +56,7 @@ const (
 // gcsChunkingEnabled is used to enable and disable chunking of file upload to
 // Google Cloud Storage.
 var gcsChunkingEnabled = settings.RegisterBoolSetting(
-	settings.TenantWritable,
+	settings.ApplicationLevel,
 	"cloudstorage.gs.chunking.enabled",
 	"enable chunking of file upload to Google Cloud Storage",
 	true, /* default */
@@ -70,14 +65,14 @@ var gcsChunkingEnabled = settings.RegisterBoolSetting(
 // gcsChunkRetryTimeout is used to configure the per-chunk retry deadline when
 // uploading chunks to Google Cloud Storage.
 var gcsChunkRetryTimeout = settings.RegisterDurationSetting(
-	settings.TenantWritable,
+	settings.ApplicationLevel,
 	"cloudstorage.gs.chunking.retry_timeout",
 	"per-chunk retry deadline when chunking of file upload to Google Cloud Storage",
 	60*time.Second,
 	settings.WithName("cloudstorage.gs.chunking.per_chunk_retry.timeout"),
 )
 
-func parseGSURL(_ cloud.ExternalStorageURIContext, uri *url.URL) (cloudpb.ExternalStorage, error) {
+func parseGSURL(uri *url.URL) (cloudpb.ExternalStorage, error) {
 	gsURL := cloud.ConsumeURL{URL: uri}
 	conf := cloudpb.ExternalStorage{}
 	conf.Provider = cloudpb.ExternalStorageProvider_gs
@@ -132,7 +127,7 @@ func (g *gcsStorage) Settings() *cluster.Settings {
 }
 
 func makeGCSStorage(
-	ctx context.Context, args cloud.ExternalStorageContext, dest cloudpb.ExternalStorage,
+	ctx context.Context, args cloud.EarlyBootExternalStorageContext, dest cloudpb.ExternalStorage,
 ) (cloud.ExternalStorage, error) {
 	telemetry.Count("external-io.google_cloud")
 	conf := dest.GoogleCloudConfig
@@ -182,10 +177,6 @@ func makeGCSStorage(
 	if conf.AssumeRole == "" {
 		opts = append(opts, credentialsOpt...)
 	} else {
-		if !args.Settings.Version.IsActive(ctx, clusterversion.TODODelete_V22_2SupportAssumeRoleAuth) {
-			return nil, errors.New("cannot authenticate to cloud storage via assume role until cluster has fully upgraded to 22.2")
-		}
-
 		assumeOpt, err := createImpersonateCredentials(ctx, conf.AssumeRole, conf.AssumeRoleDelegates, []string{scope}, credentialsOpt...)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to assume role")
@@ -194,7 +185,23 @@ func makeGCSStorage(
 		opts = append(opts, assumeOpt)
 	}
 
-	g, err := gcs.NewClient(ctx, opts...)
+	clientName := args.ExternalStorageOptions().ClientName
+	baseTransport, err := cloud.MakeTransport(args.Settings, args.MetricsRecorder, "gcs", conf.Bucket, clientName)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create http transport")
+	}
+
+	t, err := gtransport.NewTransport(ctx, baseTransport, opts...)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create gcs http transport")
+	}
+
+	httpClient, err := cloud.MakeHTTPClientForTransport(t)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create http client")
+	}
+
+	g, err := gcs.NewClient(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create google cloud client")
 	}
@@ -272,6 +279,11 @@ func (g *gcsStorage) Writer(ctx context.Context, basename string) (io.WriteClose
 	return w, nil
 }
 
+// isNotExistErr checks if the error indicates a file does not exist
+func isNotExistErr(err error) bool {
+	return errors.Is(err, gcs.ErrObjectNotExist)
+}
+
 func (g *gcsStorage) ReadFile(
 	ctx context.Context, basename string, opts cloud.ReadOptions,
 ) (ioctx.ReadCloserCtx, int64, error) {
@@ -310,17 +322,8 @@ func (g *gcsStorage) ReadFile(
 	)
 
 	if err := r.Open(ctx); err != nil {
-		if errors.Is(err, gcs.ErrObjectNotExist) {
-			// Callers of this method sometimes look at the returned error to determine
-			// if file does not exist.  Regardless why we couldn't open the stream
-			// (whether its invalid bucket or file doesn't exist),
-			// return our internal ErrFileDoesNotExist.
-			// nolint:errwrap
-			err = errors.Wrapf(
-				errors.Wrapf(cloud.ErrFileDoesNotExist, "gcs object %q does not exist", object),
-				"%v",
-				err.Error(),
-			)
+		if isNotExistErr(err) {
+			return nil, 0, cloud.WrapErrFileDoesNotExist(err, "gcs object does not exist")
 		}
 		return nil, 0, err
 	}
@@ -353,11 +356,14 @@ func (g *gcsStorage) List(ctx context.Context, prefix, delim string, fn cloud.Li
 }
 
 func (g *gcsStorage) Delete(ctx context.Context, basename string) error {
-	return timeutil.RunWithTimeout(ctx, "delete gcs file",
-		cloud.Timeout.Get(&g.settings.SV),
+	err := timeutil.RunWithTimeout(ctx, "delete gcs file", cloud.Timeout.Get(&g.settings.SV),
 		func(ctx context.Context) error {
 			return g.bucket.Object(path.Join(g.prefix, basename)).Delete(ctx)
 		})
+	if isNotExistErr(err) {
+		return nil
+	}
+	return err
 }
 
 func (g *gcsStorage) Size(ctx context.Context, basename string) (int64, error) {
@@ -410,5 +416,10 @@ func shouldRetry(err error) bool {
 
 func init() {
 	cloud.RegisterExternalStorageProvider(cloudpb.ExternalStorageProvider_gs,
-		parseGSURL, makeGCSStorage, cloud.RedactedParams(CredentialsParam, BearerTokenParam), gcsScheme)
+		cloud.RegisteredProvider{
+			EarlyBootParseFn:     parseGSURL,
+			EarlyBootConstructFn: makeGCSStorage,
+			RedactedParams:       cloud.RedactedParams(CredentialsParam, BearerTokenParam),
+			Schemes:              []string{gcsScheme},
+		})
 }

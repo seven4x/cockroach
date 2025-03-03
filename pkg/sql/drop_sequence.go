@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -24,13 +19,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
 type dropSequenceNode struct {
+	zeroInputPlanNode
 	n  *tree.DropSequence
 	td []toDelete
 }
@@ -190,7 +185,7 @@ func (p *planner) canRemoveOwnedSequencesImpl(
 		var firstDep *descpb.TableDescriptor_Reference
 		multipleIterationErr := seqDesc.ForeachDependedOnBy(func(dep *descpb.TableDescriptor_Reference) error {
 			if firstDep != nil {
-				return iterutil.StopIteration()
+				return errors.Newf("multiple iterations")
 			}
 			firstDep = dep
 			return nil
@@ -266,7 +261,7 @@ func dropDependentOnSequence(ctx context.Context, p *planner, seqDesc *tabledesc
 				continue
 			}
 
-			if dependent.ColumnIDs != nil && len(dependent.ColumnIDs) > 0 {
+			if len(dependent.ColumnIDs) > 0 {
 				// If we reach here, it means this sequence is depended on by a column in `t`
 				// in its default expression. Remove that column's default expression.
 				err = dropDefaultExprInDepColsOnSeq(ctx, p, t, seqDesc.Name, dependent.ColumnIDs)

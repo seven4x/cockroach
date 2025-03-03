@@ -18,11 +18,16 @@ echo
           "id": "1"
         },
         "store_id": 1,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "8388608"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "8388608",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     }
   ]
 }
@@ -37,8 +42,10 @@ echo
           "id": "1"
         },
         "store_id": 1,
-        "available_regular_tokens": "15728640",
-        "available_elastic_tokens": "6291456"
+        "available_eval_regular_tokens": "15728640",
+        "available_eval_elastic_tokens": "6291456",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
         {
@@ -57,7 +64,10 @@ echo
             "index": "43"
           }
         }
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     }
   ]
 }
@@ -72,8 +82,10 @@ echo
           "id": "1"
         },
         "store_id": 1,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "6291456"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "6291456",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
         {
@@ -92,7 +104,10 @@ echo
             "index": "47"
           }
         }
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     },
     {
       "stream": {
@@ -100,8 +115,10 @@ echo
           "id": "1"
         },
         "store_id": 2,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "7340032"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "7340032",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
         {
@@ -112,7 +129,10 @@ echo
             "index": "47"
           }
         }
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     },
     {
       "stream": {
@@ -120,8 +140,10 @@ echo
           "id": "1"
         },
         "store_id": 3,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "7340032"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "7340032",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
         {
@@ -132,7 +154,10 @@ echo
             "index": "47"
           }
         }
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     }
   ]
 }
@@ -147,8 +172,10 @@ echo
           "id": "1"
         },
         "store_id": 1,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "6291456"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "6291456",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
         {
@@ -167,7 +194,10 @@ echo
             "index": "47"
           }
         }
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     },
     {
       "stream": {
@@ -175,8 +205,10 @@ echo
           "id": "1"
         },
         "store_id": 3,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "7340032"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "7340032",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
         {
@@ -187,7 +219,10 @@ echo
             "index": "47"
           }
         }
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     }
   ]
 }
@@ -202,11 +237,16 @@ echo
           "id": "1"
         },
         "store_id": 1,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "8388608"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "8388608",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     },
     {
       "stream": {
@@ -214,11 +254,16 @@ echo
           "id": "1"
         },
         "store_id": 3,
-        "available_regular_tokens": "16777216",
-        "available_elastic_tokens": "8388608"
+        "available_eval_regular_tokens": "16777216",
+        "available_eval_elastic_tokens": "8388608",
+        "available_send_regular_tokens": "0",
+        "available_send_elastic_tokens": "0"
       },
       "tracked_deductions": [
-      ]
+      ],
+      "total_eval_deducted_tokens": "0",
+      "total_send_deducted_tokens": "0",
+      "disconnected": false
     }
   ]
 }

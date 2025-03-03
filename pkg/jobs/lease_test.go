@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs_test
 
@@ -52,13 +47,13 @@ func TestJobsTableClaimFamily(t *testing.T) {
 	_ = sqlDB.Query(t, `
 INSERT INTO system.jobs (id, status, claim_session_id, claim_instance_id, num_runs, last_run)
 VALUES (1, 'running', 'foo', 101, 100, $1)`, now)
-	var status, sessionID string
+	var state, sessionID string
 	var instanceID, numRuns int64
 	var lastRun time.Time
 	const stmt = "SELECT status, claim_session_id, claim_instance_id, num_runs, last_run FROM system.jobs WHERE id = $1"
-	sqlDB.QueryRow(t, stmt, 1).Scan(&status, &sessionID, &instanceID, &numRuns, &lastRun)
+	sqlDB.QueryRow(t, stmt, 1).Scan(&state, &sessionID, &instanceID, &numRuns, &lastRun)
 
-	require.Equal(t, "running", status)
+	require.Equal(t, "running", state)
 	require.Equal(t, "foo", sessionID)
 	require.Equal(t, int64(101), instanceID)
 	require.Equal(t, int64(100), numRuns)

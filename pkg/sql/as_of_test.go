@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -36,7 +31,7 @@ func TestAsOfTime(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	params, _ := createTestServerParams()
+	params, _ := createTestServerParamsAllowTenants()
 	params.Knobs.GCJob = &sql.GCJobTestingKnobs{RunBeforeResume: func(_ jobspb.JobID) error {
 		<-ctx.Done()
 		return nil
@@ -132,18 +127,13 @@ func TestAsOfTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Future queries shouldn't work if not marked as synthetic.
-	if err := db.QueryRow("SELECT a FROM d.t AS OF SYSTEM TIME '2200-01-01'").Scan(&i); !testutils.IsError(err, "pq: AS OF SYSTEM TIME: cannot specify timestamp in the future") {
-		t.Fatal(err)
-	}
-
 	// Future queries shouldn't work if too far in the future.
-	if err := db.QueryRow("SELECT a FROM d.t AS OF SYSTEM TIME '+10h?'").Scan(&i); !testutils.IsError(err, "pq: request timestamp .* too far in future") {
+	if err := db.QueryRow("SELECT a FROM d.t AS OF SYSTEM TIME '+10h'").Scan(&i); !testutils.IsError(err, "pq: request timestamp .* too far in future") {
 		t.Fatal(err)
 	}
 
-	// Future queries work if marked as synthetic and only slightly in future.
-	if err := db.QueryRow("SELECT a FROM d.t AS OF SYSTEM TIME '+10ms?'").Scan(&i); err != nil {
+	// Future queries work if only slightly in the future.
+	if err := db.QueryRow("SELECT a FROM d.t AS OF SYSTEM TIME '+10ms'").Scan(&i); err != nil {
 		t.Fatal(err)
 	}
 
@@ -273,7 +263,7 @@ func TestAsOfRetry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	params, cmdFilters := createTestServerParams()
+	params, cmdFilters := createTestServerParamsAllowTenants()
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 

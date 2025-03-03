@@ -1,17 +1,11 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colinfo
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -27,14 +21,14 @@ import (
 // scalar type String).
 //
 // This is used by the UPDATE, INSERT and UPSERT code.
-func CheckDatumTypeFitsColumnType(col catalog.Column, typ *types.T) error {
+func CheckDatumTypeFitsColumnType(colName string, colTyp *types.T, typ *types.T) error {
 	if typ.Family() == types.UnknownFamily {
 		return nil
 	}
-	if !typ.Equivalent(col.GetType()) {
+	if !typ.Equivalent(colTyp) {
 		return pgerror.Newf(pgcode.DatatypeMismatch,
 			"value type %s doesn't match type %s of column %q",
-			typ.String(), col.GetType().String(), tree.ErrNameString(col.GetName()))
+			typ.String(), colTyp.String(), tree.ErrNameString(colName))
 	}
 	return nil
 }
@@ -83,10 +77,13 @@ func CanHaveCompositeKeyEncoding(typ *types.T) bool {
 		types.EnumFamily,
 		types.Box2DFamily,
 		types.PGLSNFamily,
+		types.PGVectorFamily,
+		types.RefCursorFamily,
 		types.VoidFamily,
 		types.EncodedKeyFamily,
 		types.TSQueryFamily,
-		types.TSVectorFamily:
+		types.TSVectorFamily,
+		types.JsonpathFamily:
 		return false
 	case types.UnknownFamily,
 		types.AnyFamily:

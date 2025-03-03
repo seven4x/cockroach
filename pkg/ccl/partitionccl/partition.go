@@ -1,10 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package partitionccl
 
@@ -13,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -52,7 +50,7 @@ func valueEncodePartitionTuple(
 	// We are operating in a context where the expressions cannot
 	// refer to table columns, so these two names are unambiguously
 	// referring to the desired partition boundaries.
-	maybeTuple, _ = tree.WalkExpr(replaceMinMaxValVisitor{}, maybeTuple)
+	maybeTuple, _ = tree.WalkExpr(zonepb.ReplaceMinMaxValVisitor{}, maybeTuple)
 
 	tuple, ok := maybeTuple.(*tree.Tuple)
 	if !ok {
@@ -101,7 +99,8 @@ func valueEncodePartitionTuple(
 		}
 
 		var semaCtx tree.SemaContext
-		typedExpr, err := schemaexpr.SanitizeVarFreeExpr(ctx, expr, cols[i].GetType(), "partition",
+		colTyp := cols[i].GetType()
+		typedExpr, err := schemaexpr.SanitizeVarFreeExpr(ctx, expr, colTyp, "partition",
 			&semaCtx,
 			volatility.Immutable,
 			false, /*allowAssignmentCast*/
@@ -117,38 +116,17 @@ func valueEncodePartitionTuple(
 		if err != nil {
 			return nil, errors.Wrapf(err, "evaluating %s", typedExpr)
 		}
-		if err := colinfo.CheckDatumTypeFitsColumnType(cols[i], datum.ResolvedType()); err != nil {
+		err = colinfo.CheckDatumTypeFitsColumnType(cols[i].GetName(), colTyp, datum.ResolvedType())
+		if err != nil {
 			return nil, err
 		}
-		value, err = valueside.Encode(value, valueside.NoColumnID, datum, scratch)
+		value, scratch, err = valueside.EncodeWithScratch(value, valueside.NoColumnID, datum, scratch[:0])
 		if err != nil {
 			return nil, err
 		}
 	}
 	return value, nil
 }
-
-// replaceMinMaxValVisitor replaces occurrences of the unqualified
-// identifiers "minvalue" and "maxvalue" in the partitioning
-// (sub-)exprs by the symbolic values tree.PartitionMinVal and
-// tree.PartitionMaxVal.
-type replaceMinMaxValVisitor struct{}
-
-// VisitPre satisfies the tree.Visitor interface.
-func (v replaceMinMaxValVisitor) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
-	if t, ok := expr.(*tree.UnresolvedName); ok && t.NumParts == 1 {
-		switch t.Parts[0] {
-		case "minvalue":
-			return false, tree.PartitionMinVal{}
-		case "maxvalue":
-			return false, tree.PartitionMaxVal{}
-		}
-	}
-	return true, expr
-}
-
-// VisitPost satisfies the Visitor interface.
-func (replaceMinMaxValVisitor) VisitPost(expr tree.Expr) tree.Expr { return expr }
 
 func createPartitioningImpl(
 	ctx context.Context,
@@ -204,9 +182,15 @@ func createPartitioningImpl(
 				"declared partition columns (%s) do not match first %d columns in index being partitioned (%s)",
 				partitioningString(), n, strings.Join(newIdxColumnNames[:n], ", "))
 		}
-		if col.GetType().Family() == types.ArrayFamily {
-			return partDesc, unimplemented.NewWithIssuef(91766, "partitioning by array column (%s) not supported",
-				col.GetName())
+		switch col.GetType().Family() {
+		case types.ArrayFamily:
+			return partDesc, unimplemented.NewWithIssuef(91766,
+				"partitioning by array column (%s) not supported", col.GetName())
+
+		case types.PGVectorFamily:
+			// Can't partition by a column that does not have linear ordering.
+			return partDesc, pgerror.Newf(pgcode.FeatureNotSupported,
+				"partitioning by vector column (%s) not supported", col.GetName())
 		}
 	}
 
@@ -351,7 +335,7 @@ func createPartitioning(
 	allowedNewColumnNames []tree.Name,
 	allowImplicitPartitioning bool,
 ) (newImplicitCols []catalog.Column, newPartitioning catpb.PartitioningDescriptor, err error) {
-	if err := utilccl.CheckEnterpriseEnabled(st, evalCtx.ClusterID, "partitions"); err != nil {
+	if err := utilccl.CheckEnterpriseEnabled(st, "partitions"); err != nil {
 		return nil, newPartitioning, err
 	}
 

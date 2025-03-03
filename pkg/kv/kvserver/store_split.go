@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -17,13 +12,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/load"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 // splitPreApply is called when the raft command is applied. Any
@@ -94,7 +89,7 @@ func splitPreApply(
 				log.Fatalf(ctx, "failed to load hard state for removed rhs: %v", err)
 			}
 		}
-		if err := kvstorage.ClearRangeData(split.RightDesc.RangeID, readWriter, readWriter, kvstorage.ClearRangeDataOptions{
+		if err := kvstorage.ClearRangeData(ctx, split.RightDesc.RangeID, readWriter, readWriter, kvstorage.ClearRangeDataOptions{
 			// We know there isn't anything in these two replicated spans below in the
 			// right-hand side (before the current batch), so setting these options
 			// will in effect only clear the writes to the RHS replicated state we have
@@ -253,7 +248,9 @@ func prepareRightReplicaForSplit(
 	// Already holding raftMu, see above.
 	rightRepl.mu.Lock()
 	defer rightRepl.mu.Unlock()
-	if err := rightRepl.initRaftMuLockedReplicaMuLocked(state); err != nil {
+	if err := rightRepl.initRaftMuLockedReplicaMuLocked(
+		state, false, /* waitForPrevLeaseToExpire */
+	); err != nil {
 		log.Fatalf(ctx, "%v", err)
 	}
 
@@ -268,9 +265,9 @@ func prepareRightReplicaForSplit(
 	// the replica according to whether it holds the lease. This enables the
 	// txnWaitQueue.
 	rightRepl.leasePostApplyLocked(ctx,
-		rightRepl.mu.state.Lease, /* prevLease */
-		rightRepl.mu.state.Lease, /* newLease - same as prevLease */
-		nil,                      /* priorReadSum */
+		rightRepl.shMu.state.Lease, /* prevLease */
+		rightRepl.shMu.state.Lease, /* newLease - same as prevLease */
+		nil,                        /* priorReadSum */
 		assertNoLeaseJump)
 
 	// We need to explicitly unquiesce the Raft group on the right-hand range or
@@ -309,11 +306,11 @@ func (s *Store) SplitRange(
 	defer s.mu.Unlock()
 	leftRepl.setDescRaftMuLocked(ctx, newLeftDesc)
 
-	// Clear the LHS lock and txn wait-queues, to redirect to the RHS if
+	// Clear or split the LHS lock and txn wait-queues, to redirect to the RHS if
 	// appropriate. We do this after setDescWithoutProcessUpdate to ensure
 	// that no pre-split commands are inserted into the wait-queues after we
 	// clear them.
-	leftRepl.concMgr.OnRangeSplit()
+	locksToAcquireOnRHS := leftRepl.concMgr.OnRangeSplit(roachpb.Key(rightDesc.StartKey))
 
 	if rightReplOrNil == nil {
 		// There is no RHS replica, so (heuristically) halve the load stats for the
@@ -323,6 +320,13 @@ func (s *Store) SplitRange(
 		return nil
 	}
 	rightRepl := rightReplOrNil
+
+	// Acquire unreplicated locks on the RHS. We expect locksToAcquireOnRHS to be
+	// empty if UnreplicatedLockReliabilityUpgrade is false.
+	log.VInfof(ctx, 2, "acquiring %d locks on the RHS", len(locksToAcquireOnRHS))
+	for _, l := range locksToAcquireOnRHS {
+		rightRepl.concMgr.OnLockAcquired(ctx, &l)
+	}
 
 	// Split the replica load of the LHS evenly (50:50) with the RHS. NB: this
 	// ignores the split point, and makes as simplifying assumption that

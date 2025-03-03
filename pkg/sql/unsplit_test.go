@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -18,18 +13,20 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUnsplitAt(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	params, _ := createTestServerParams()
+	params, _ := createTestServerParamsAllowTenants()
 	// TODO(jeffreyxiao): Disable the merge queue due to a race condition. The
 	// merge queue might issue an AdminMerge and before the actual merge happens,
 	// the LHS of the merge is manually split and is later merged even though a
@@ -45,6 +42,15 @@ func TestUnsplitAt(t *testing.T) {
 	}
 	s, db, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
+
+	if s.DeploymentMode().IsExternal() {
+		require.NoError(t, s.GrantTenantCapabilities(
+			context.Background(), serverutils.TestTenantID(),
+			map[tenantcapabilities.ID]string{
+				tenantcapabilities.CanAdminSplit:   "true",
+				tenantcapabilities.CanAdminUnsplit: "true",
+			}))
+	}
 
 	r := sqlutils.MakeSQLRunner(db)
 

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -18,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/assertion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/gen"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/history"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/state"
 )
 
@@ -36,16 +32,18 @@ type testSettings struct {
 	duration      time.Duration
 	verbose       OutputFlags
 	randSource    *rand.Rand
-	assertions    []SimulationAssertion
+	assertions    []assertion.SimulationAssertion
 	randOptions   testRandOptions
 	clusterGen    clusterGenSettings
 	rangeGen      rangeGenSettings
+	eventGen      eventGenSettings
 }
 
 type randTestingFramework struct {
-	s                 testSettings
-	rangeGenerator    generator
-	keySpaceGenerator generator
+	s                     testSettings
+	defaultStaticSettings staticOptionSettings
+	rangeGenerator        generator
+	keySpaceGenerator     generator
 }
 
 // newRandTestingFramework constructs a new testing framework with the given
@@ -54,55 +52,60 @@ type randTestingFramework struct {
 // distribution as ranges are generated. Additionally, it initializes a buffer
 // that persists across all iterations, recording outputs and states of each
 // iteration.
-func newRandTestingFramework(settings testSettings) randTestingFramework {
+func newRandTestingFramework(
+	s testSettings, staticOptionSettings staticOptionSettings,
+) randTestingFramework {
 	if int64(defaultMaxRange) > defaultMinKeySpace {
 		panic(fmt.Sprintf(
 			"Max number of ranges specified (%d) is greater than number of keys in key space (%d) ",
 			defaultMaxRange, defaultMinKeySpace))
 	}
-	rangeGenerator := newGenerator(settings.randSource, defaultMinRange, defaultMaxRange, settings.rangeGen.rangeGenType)
-	keySpaceGenerator := newGenerator(settings.randSource, defaultMinKeySpace, defaultMaxKeySpace, settings.rangeGen.keySpaceGenType)
+	rangeGenerator := newGenerator(s.randSource, defaultMinRange, defaultMaxRange, s.rangeGen.rangeGenType)
+	keySpaceGenerator := newGenerator(s.randSource, defaultMinKeySpace, defaultMaxKeySpace, s.rangeGen.keySpaceGenType)
 
 	return randTestingFramework{
-		s:                 settings,
-		rangeGenerator:    rangeGenerator,
-		keySpaceGenerator: keySpaceGenerator,
+		defaultStaticSettings: staticOptionSettings,
+		s:                     s,
+		rangeGenerator:        rangeGenerator,
+		keySpaceGenerator:     keySpaceGenerator,
 	}
 }
 
 func (f randTestingFramework) getCluster() gen.ClusterGen {
 	if !f.s.randOptions.cluster {
-		return defaultBasicClusterGen()
+		return f.defaultBasicClusterGen()
 	}
 	return f.randomClusterInfoGen(f.s.randSource)
 }
 
 func (f randTestingFramework) getRanges() gen.RangeGen {
 	if !f.s.randOptions.ranges {
-		return defaultBasicRangesGen()
+		return f.defaultBasicRangesGen()
 	}
 	return f.randomBasicRangesGen()
 }
 
 func (f randTestingFramework) getLoad() gen.LoadGen {
 	if !f.s.randOptions.load {
-		return defaultLoadGen()
+		return f.defaultLoadGen()
 	}
 	return gen.BasicLoad{}
 }
 
 func (f randTestingFramework) getStaticSettings() gen.StaticSettings {
 	if !f.s.randOptions.staticSettings {
-		return defaultStaticSettingsGen()
+		return f.defaultStaticSettingsGen()
 	}
 	return gen.StaticSettings{}
 }
 
-func (f randTestingFramework) getStaticEvents() gen.StaticEvents {
+func (f randTestingFramework) getStaticEvents(
+	cluster gen.ClusterGen, settings gen.StaticSettings,
+) gen.StaticEvents {
 	if !f.s.randOptions.staticEvents {
-		return defaultStaticEventsGen()
+		return f.defaultStaticEventsGen()
 	}
-	return gen.StaticEvents{}
+	return f.randomEventSeriesGen(cluster, settings)
 }
 
 // runRandTest creates randomized configurations based on the specified test
@@ -113,23 +116,25 @@ func (f randTestingFramework) runRandTest() testResult {
 	ranges := f.getRanges()
 	load := f.getLoad()
 	staticSettings := f.getStaticSettings()
-	staticEvents := f.getStaticEvents()
+	staticEvents := f.getStaticEvents(cluster, staticSettings)
 	seed := f.s.randSource.Int63()
 	simulator := gen.GenerateSimulation(f.s.duration, cluster, ranges, load, staticSettings, staticEvents, seed)
-	initialState, initialTime := simulator.State(), simulator.Curr()
+	initialStateStr, initialTime := simulator.State().PrettyPrint(), simulator.Curr()
 	simulator.RunSim(ctx)
 	history := simulator.History()
 	failed, reason := checkAssertions(ctx, history, f.s.assertions)
 	return testResult{
-		seed:         seed,
-		failed:       failed,
-		reason:       reason,
-		clusterGen:   cluster,
-		rangeGen:     ranges,
-		loadGen:      load,
-		eventGen:     staticEvents,
-		initialState: initialState,
-		initialTime:  initialTime,
+		seed:            seed,
+		failed:          failed,
+		reason:          reason,
+		clusterGen:      cluster,
+		rangeGen:        ranges,
+		loadGen:         load,
+		eventGen:        staticEvents,
+		initialStateStr: initialStateStr,
+		initialTime:     initialTime,
+		history:         history,
+		eventExecutor:   simulator.EventExecutor(),
 	}
 }
 
@@ -143,9 +148,10 @@ func (f randTestingFramework) runRandTestRepeated() testResultsReport {
 		outputs[i] = f.runRandTest()
 	}
 	return testResultsReport{
-		flags:       f.s.verbose,
-		settings:    f.s,
-		outputSlice: outputs,
+		flags:          f.s.verbose,
+		settings:       f.s,
+		staticSettings: f.defaultStaticSettings,
+		outputSlice:    outputs,
 	}
 }
 
@@ -162,7 +168,7 @@ func loadClusterInfo(configName string) gen.LoadedCluster {
 // checkAssertions checks the given history and assertions, returning (bool,
 // reason) indicating any failures and reasons if any assertions fail.
 func checkAssertions(
-	ctx context.Context, history asim.History, assertions []SimulationAssertion,
+	ctx context.Context, history history.History, assertions []assertion.SimulationAssertion,
 ) (bool, string) {
 	assertionFailures := []string{}
 	failureExists := false
@@ -232,6 +238,12 @@ func (f randTestingFramework) randomBasicRangesGen() gen.RangeGen {
 		if len(f.s.rangeGen.weightedRand) == 0 {
 			panic("set weightedRand array for stores properly to use weighted random placement for stores")
 		}
+		if f.s.randOptions.cluster {
+			panic("randomized cluster with weighted rand stores is not supported")
+		}
+		if stores, length := f.defaultStaticSettings.storesPerNode*f.defaultStaticSettings.nodes, len(f.s.rangeGen.weightedRand); stores != length {
+			panic(fmt.Sprintf("number of stores %d does not match length of weighted_rand %d: ", stores, length))
+		}
 		return WeightedRandomizedBasicRanges{
 			BaseRanges: gen.BaseRanges{
 				Ranges:            convertInt64ToInt(f.rangeGenerator.key()),
@@ -245,5 +257,18 @@ func (f randTestingFramework) randomBasicRangesGen() gen.RangeGen {
 		}
 	default:
 		panic("unknown ranges placement type")
+	}
+}
+
+func (f randTestingFramework) randomEventSeriesGen(
+	cluster gen.ClusterGen, settings gen.StaticSettings,
+) gen.StaticEvents {
+	switch eventsType := f.s.eventGen.eventsType; eventsType {
+	case cycleViaHardcodedSurvivalGoals:
+		return generateHardcodedSurvivalGoalsEvents(cluster.Regions(), settings.Settings.StartTime, f.s.eventGen.durationToAssertOnEvent)
+	case cycleViaRandomSurvivalGoals:
+		return generateRandomSurvivalGoalsEvents(cluster.Regions(), settings.Settings.StartTime, f.s.eventGen.durationToAssertOnEvent, f.s.duration, f.s.randSource)
+	default:
+		panic("unknown event series type")
 	}
 }

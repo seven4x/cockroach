@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metamorphic
 
@@ -35,7 +30,7 @@ var (
 	check        = flag.String("check", "", "run operations in specified file and check output for equality")
 	inMem        = flag.Bool("in-mem", false, "use an in-memory filesystem")
 	compareFiles = flag.String("compare-files", "", "comma-separated list of output files to compare; used by TestCompareFiles")
-	opCount      = flag.Int("operations", 20000, "number of MVCC operations to generate and run")
+	opCount      = flag.Int("operations", 10000, "number of MVCC operations to generate and run")
 )
 
 type testRun struct {

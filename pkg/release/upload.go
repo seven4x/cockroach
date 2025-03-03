@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package release
 
@@ -123,6 +118,7 @@ func createZip(files []ArchiveFile, body *bytes.Buffer, prefix string) error {
 		if err != nil {
 			return fmt.Errorf("failed to open file: %s", f.LocalAbsolutePath)
 		}
+		//nolint:deferloop TODO(#137605)
 		defer func() { _ = file.Close() }()
 
 		stat, err := file.Stat()
@@ -159,6 +155,7 @@ func createTarball(files []ArchiveFile, body *bytes.Buffer, prefix string) error
 		if err != nil {
 			return fmt.Errorf("failed to open file: %s", f.LocalAbsolutePath)
 		}
+		//nolint:deferloop TODO(#137605)
 		defer func() { _ = file.Close() }()
 
 		stat, err := file.Stat()
@@ -204,6 +201,7 @@ func PutNonRelease(svc ObjectPutGetter, o PutNonReleaseOptions) {
 		if err != nil {
 			log.Fatalf("failed to open %s: %s", f.LocalAbsolutePath, err)
 		}
+		//nolint:deferloop TODO(#137605)
 		defer func() {
 			_ = fileToUpload.Close()
 		}()

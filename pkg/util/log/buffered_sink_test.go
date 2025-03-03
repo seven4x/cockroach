@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -60,6 +55,7 @@ func addArgs(f func()) func([]byte, sinkOutputOptions) {
 
 func TestBufferOneLine(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, noSizeTrigger, noMaxBufferSize, nil)
 	defer cleanup()
 
@@ -77,6 +73,7 @@ func TestBufferOneLine(t *testing.T) {
 
 func TestBufferSinkBuffers(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, noSizeTrigger, noMaxBufferSize, nil)
 	defer cleanup()
 
@@ -104,6 +101,7 @@ func TestBufferSinkBuffers(t *testing.T) {
 
 func TestBufferMaxStaleness(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	sink, mock, cleanup := getMockBufferedSync(t, time.Second /* maxStaleness*/, noSizeTrigger, noMaxBufferSize, nil)
 	defer cleanup()
 
@@ -121,6 +119,7 @@ func TestBufferMaxStaleness(t *testing.T) {
 
 func TestBufferSizeTrigger(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, 2 /* sizeTrigger */, noMaxBufferSize, nil)
 	defer cleanup()
 
@@ -138,6 +137,7 @@ func TestBufferSizeTrigger(t *testing.T) {
 
 func TestBufferSizeTriggerMultipleFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, 8 /* sizeTrigger */, noMaxBufferSize, nil)
 	defer cleanup()
 
@@ -170,7 +170,7 @@ func TestBufferSizeTriggerMultipleFlush(t *testing.T) {
 
 func TestBufferedSinkCrashOnAsyncFlushErr(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
+	defer Scope(t).Close(t)
 	closer := newBufferedSinkCloser()
 	defer func() { require.NoError(t, closer.Close(defaultCloserTimeout)) }()
 	ctrl := gomock.NewController(t)
@@ -206,6 +206,7 @@ func TestBufferedSinkCrashOnAsyncFlushErr(t *testing.T) {
 // the flush is done, in the case where a tryForceSync isn't already scheduled.
 func TestBufferedSinkTryForceSync(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, noSizeTrigger, noMaxBufferSize, nil)
 	defer cleanup()
 
@@ -237,6 +238,7 @@ func TestBufferedSinkTryForceSync(t *testing.T) {
 // of the already-scheduled flush.
 func TestBufferedSinkTryForceSync_SyncFlushAlreadyScheduled(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	closer := newBufferedSinkCloser()
 	defer func() { require.NoError(t, closer.Close(defaultCloserTimeout)) }()
 	ctrl := gomock.NewController(t)
@@ -305,6 +307,7 @@ func TestBufferedSinkTryForceSync_SyncFlushAlreadyScheduled(t *testing.T) {
 // Test that messages are buffered while a flush is in-flight.
 func TestBufferedSinkBlockedFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	closer := newBufferedSinkCloser()
 	defer func() { require.NoError(t, closer.Close(defaultCloserTimeout)) }()
 	ctrl := gomock.NewController(t)
@@ -385,6 +388,7 @@ b9`), out)
 // Test that multiple messages with the tryForceSync option work.
 func TestBufferedSinkSyncFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	closer := newBufferedSinkCloser()
 	defer func() { require.NoError(t, closer.Close(defaultCloserTimeout)) }()
 	ctrl := gomock.NewController(t)
@@ -401,6 +405,7 @@ func TestBufferedSinkSyncFlush(t *testing.T) {
 
 func TestBufferCtxDoneFlushesRemainingMsgs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	closer := newBufferedSinkCloser()
 	ctrl := gomock.NewController(t)
 	mock := NewMockLogSink(ctrl)
@@ -425,6 +430,7 @@ func TestBufferCtxDoneFlushesRemainingMsgs(t *testing.T) {
 
 func TestBufferFormatJsonArray(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	fmtType := logconfig.BufferFormat("json-array")
 	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, 8 /* sizeTrigger */, noMaxBufferSize, &fmtType)
 	defer cleanup()
@@ -459,10 +465,46 @@ func TestBufferFormatJsonArray(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("second flush didn't happen")
 	}
+}
 
+func TestBufferFormatNone(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
+	fmtType := logconfig.BufferFmtNone
+	sink, mock, cleanup := getMockBufferedSync(t, noMaxStaleness, 8 /* sizeTrigger */, noMaxBufferSize, &fmtType)
+	defer cleanup()
+
+	// Test that the bufferedSink doesn't modify/format the output messages.
+	flush1C := make(chan struct{})
+	flush2C := make(chan struct{})
+
+	gomock.InOrder(
+		mock.EXPECT().
+			output(gomock.Eq([]byte("test1test2")), sinkOutputOptionsMatcher{extraFlush: gomock.Eq(true)}).
+			Do(addArgs(func() { close(flush1C) })),
+		mock.EXPECT().
+			output(gomock.Eq([]byte("test3")), sinkOutputOptionsMatcher{extraFlush: gomock.Eq(true)}).
+			Do(addArgs(func() { close(flush2C) })),
+	)
+
+	require.NoError(t, sink.output([]byte("test1"), sinkOutputOptions{}))
+	require.NoError(t, sink.output([]byte("test2"), sinkOutputOptions{}))
+	select {
+	case <-flush1C:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first flush didn't happen")
+	}
+	require.NoError(t, sink.output([]byte("test3"), sinkOutputOptions{extraFlush: true}))
+	select {
+	case <-flush2C:
+	case <-time.After(10 * time.Second):
+		t.Fatal("second flush didn't happen")
+	}
 }
 
 func TestMsgBufFlushFormat(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer Scope(t).Close(t)
 	testCases := []struct {
 		bufferContents []string
 		prefix         string

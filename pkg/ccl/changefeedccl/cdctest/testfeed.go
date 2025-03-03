@@ -1,15 +1,13 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdctest
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -35,6 +33,9 @@ type TestFeedMessage struct {
 	Topic, Partition string
 	Key, Value       []byte
 	Resolved         []byte
+
+	// RawMessage is the sink-specific message type.
+	RawMessage interface{}
 }
 
 func (m TestFeedMessage) String() string {
@@ -73,14 +74,18 @@ type EnterpriseTestFeed interface {
 	Pause() error
 	// Resume restarts the feed from the last changefeed-wide resolved timestamp.
 	Resume() error
-	// WaitForStatus waits for the provided func to return true, or returns an error.
-	WaitForStatus(func(s jobs.Status) bool) error
+	// WaitForState waits for the provided func to return true, or returns an error.
+	WaitForState(func(s jobs.State) bool) error
+	// WaitDurationForState waits for a specified time for the provided func to return true, or returns an error.
+	WaitDurationForState(dur time.Duration, statusPred func(state jobs.State) bool) error
 	// FetchTerminalJobErr retrieves the error message from changefeed job.
 	FetchTerminalJobErr() error
-	// FetchRunningStatus retrieves running status from changefeed job.
-	FetchRunningStatus() (string, error)
+	// FetchStatus retrieves running status from changefeed job.
+	FetchStatusMessage() (string, error)
 	// Details returns changefeed details for this feed.
 	Details() (*jobspb.ChangefeedDetails, error)
+	// Progress returns the changefeed progress for this feed.
+	Progress() (*jobspb.ChangefeedProgress, error)
 	// HighWaterMark returns feed highwatermark.
 	HighWaterMark() (hlc.Timestamp, error)
 	// TickHighWaterMark waits until job highwatermark progresses beyond specified threshold.
